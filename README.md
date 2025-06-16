@@ -21,7 +21,7 @@ tour-virtual/
 1. Clone o repositório:
 
 ```bash
-   git clone https://github.com/seu-usuario/tour-virtual-unipampa.git
+   git clone https://github.com/raissapedroso/tour-virtual.git
 ```
 
 2. Entra no diretório principal 
