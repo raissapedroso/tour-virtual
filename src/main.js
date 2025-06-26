@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/examples/jsm/webxr/VRButton.js';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'; //permite mover a câmera com o mouse fora do modo VR.
-import { scenesData } from "./scenes/scenesData.js";
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { scenesData } from './scenes/scenesData.js';
+
 
 let camera, scene, renderer;
 let controller1, controller2;
@@ -10,45 +11,58 @@ let raycaster, tempMatrix;
 let hotspotMeshes = [];
 let currentPanoramaMesh = null;
 
-const mouse = new THREE.Vector2();
 
-//Inicializa o ambiente da aplicação.
+let fadePlane, fadeOpacity = 0, fading = false, fadeDirection = 1, fadeCallback = null;
+const clock = new THREE.Clock();
+
+
+const mouse = new THREE.Vector2();
+let savedCameraQuaternion = new THREE.Quaternion();
+
+
 init();
-//Carrega uma cena específica, chamada 'panorama1'.
 loadScene('panorama0');
-//Inicia o loop de animação.
 animate();
 
 function init() {
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
 
+    // Câmera do usuário
     camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
-    camera.position.set(0, 1.6, 0);
+    camera.position.set(0, 1.6, 0); // Altura média dos olhos
+    camera.lookAt(new THREE.Vector3(0, 1.6, -1)); // Olhar para frente
+
 
     const light = new THREE.HemisphereLight(0xffffff, 0x444444);
     scene.add(light);
 
+
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.xr.enabled = true;
+    renderer.xr.enabled = true; // Ativa XR (VR)
+    renderer.xr.setReferenceSpaceType('local-floor');
+
+
     document.body.appendChild(renderer.domElement);
     document.body.appendChild(VRButton.createButton(renderer));
 
-    // Controles para modo não-VR
+    // Controles de mouse (modo não-VR)
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
     controls.minDistance = 1;
     controls.maxDistance = 100;
-    controls.dampingFactor = 0.2; //suavização
-    controls.rotateSpeed = 0.3; //velocidade da rotação do mouse
+    controls.dampingFactor = 0.2;
+    controls.rotateSpeed = -0.3;
+    controls.target.set(0, 1.6, -1); // Olhar fixo para frente
+    controls.update();
 
+    // Raycaster para detectar cliques nos hotspots
     raycaster = new THREE.Raycaster();
-    raycaster.camera = camera;
     tempMatrix = new THREE.Matrix4();
 
-    // Controller VR
+    // Controladores VR
     controller1 = renderer.xr.getController(0);
     controller1.addEventListener('selectstart', onSelectStart);
     scene.add(controller1);
@@ -57,7 +71,7 @@ function init() {
     controller2.addEventListener('selectstart', onSelectStart);
     scene.add(controller2);
 
-// Adiciona o laser (linha) para os dois controles
+    // Linhas laser nos controles VR
     [controller1, controller2].forEach(controller => {
         const geometryLine = new THREE.BufferGeometry().setFromPoints([
             new THREE.Vector3(0, 0, 0),
@@ -70,158 +84,180 @@ function init() {
         controller.add(line);
     });
 
-    //addEventListener() registra uma única espera de evento em um único alvo.
-    // O alvo do evento pode ser um único elemento em um documento, o documento em si,
-    // uma janela, ou um XMLHttpRequest.
-    // Para registrar mais de uma espera de evento como alvo, chame addEventListener()
-    // para o mesmo alvo mas com diferentes tipos de evento ou captura de parâmetros.
-    //Aqui ele registra qual evento foi feito e chama a determinada função para isso
+
+    const fadeGeometry = new THREE.PlaneGeometry(2, 2);
+    const fadeMaterial = new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        transparent: true,
+        opacity: 0,
+        depthTest: false,
+        depthWrite: false
+    });
+    fadePlane = new THREE.Mesh(fadeGeometry, fadeMaterial);
+    fadePlane.renderOrder = 999;
+    fadePlane.frustumCulled = false;
+    scene.add(fadePlane);
+
+
     window.addEventListener('resize', onWindowResize);
-    window.addEventListener('pointerdown', onPointerDown, false); //evento que pega mouse e celular
+    window.addEventListener('pointerdown', onPointerDown);
 }
+
+
+function startFade(direction, callback) {
+    fadeDirection = direction;
+    fadeCallback = callback;
+    fading = true;
+}
+
 
 function loadScene(sceneName) {
     const data = scenesData[sceneName];
+    if (!data) {
+        console.warn(`Cena "${sceneName}" não encontrada.`);
+        return;
+    }
 
-    //Em vez de carregar todas as imagens no início, carregue somente a imagem da cena atual e libere da memória as anteriores
+
+    savedCameraQuaternion.copy(camera.quaternion);
+
+
     if (currentPanoramaMesh) {
         scene.remove(currentPanoramaMesh);
         currentPanoramaMesh.geometry.dispose();
-        currentPanoramaMesh.material.map.dispose();
+        if (currentPanoramaMesh.material.map) currentPanoramaMesh.material.map.dispose();
         currentPanoramaMesh.material.dispose();
+        currentPanoramaMesh = null;
     }
 
+    // Remove hotspots antigos
     hotspotMeshes.forEach(mesh => {
         scene.remove(mesh);
-        mesh.geometry?.dispose?.();
-        mesh.material?.dispose?.();
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (mesh.material) mesh.material.dispose();
     });
     hotspotMeshes = [];
 
-    //É criado uma esfera gigante invertida (o lado de dentro é visível).
+
     const geometry = new THREE.SphereGeometry(50, 128, 128);
-    geometry.scale(-1, 1, 1);
-
-    //Aqui é aplicado uma imagem panorâmica como textura:
-    const texture = new THREE.TextureLoader().load(data.image, (tex) => {
-        tex.minFilter = THREE.LinearMipMapLinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-    });
-
-    const material = new THREE.MeshBasicMaterial({
-        map: texture,
-        transparent: false,
-        opacity: 1
-    });
-
-    // transição simples para a mudança de cena (deve ser melhorado!)
-    /*let opacity = 0;
-    const interval = setInterval(() => {
-        opacity += 0.05;
-        if (currentPanoramaMesh) currentPanoramaMesh.material.opacity = opacity;
-        if (opacity >= 1) clearInterval(interval);
-    }, 30);*/
+    geometry.scale(-1, 1, 1); // Inverter
 
 
+    const texture = new THREE.TextureLoader().load(data.image);
+    const material = new THREE.MeshBasicMaterial({ map: texture });
     currentPanoramaMesh = new THREE.Mesh(geometry, material);
     currentPanoramaMesh.userData.ignoreRaycast = true;
     scene.add(currentPanoramaMesh);
 
+
     data.hotspots.forEach(hotspot => {
         let material;
         if (hotspot.icon) {
-            //imagem do hotspots
-            const texture = new THREE.TextureLoader().load('click.png');
-            material = new THREE.SpriteMaterial({
-                map: texture,
-                transparent: true,
-                alphaTest: 0.01
-            });
+            const hotspotTexture = new THREE.TextureLoader().load(hotspot.icon);
+            material = new THREE.SpriteMaterial({ map: hotspotTexture, transparent: true, alphaTest: 0.01 });
         } else {
             material = new THREE.SpriteMaterial({ color: 0xffff00 });
         }
 
         const sprite = new THREE.Sprite(material);
         sprite.position.set(hotspot.position.x, hotspot.position.y, hotspot.position.z);
-        sprite.scale.set(2.5, 2.5, 1); // ajuste o tamanho da imagem do hotspots, conforme necessário
+        sprite.scale.set(2.5, 2.5, 1);
         sprite.userData.target = hotspot.target;
         hotspotMeshes.push(sprite);
         scene.add(sprite);
     });
 
-}
 
-//Clique com controle do óculos
-//Quando o usuário clica ou aperta um botão no controle VR (por exemplo, o gatilho).
-//Ela verifica se o controle está apontando para algum hotspot, e se estiver, muda de cena.
-function onSelectStart(event) {
-    //Pega qual controle disparou o evento (pode ser controller1 ou controller2).
-    const thisController = event.target;
-
-    //Serve para saber para onde o controle está apontando.
-    const tempMatrix = new THREE.Matrix4();
-    tempMatrix.identity().extractRotation(thisController.matrixWorld);
-
-    //origem e direção do raio
-    raycaster.ray.origin.setFromMatrixPosition(thisController.matrixWorld);
-    raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
-
-    //Verifica quais objetos (hotspots) estão sendo tocados por esse raio invisível
-    const intersects = raycaster.intersectObjects(hotspotMeshes, false);
-    //Se o controle está apontando para algum hotspot...
-    if (intersects.length > 0) {
-        //Pega o valor target que foi armazenado nos dados extras (userData) do objeto atingido. Isso geralmente é um nome de cena, link, ou identificador.
-        const target = intersects[0].object.userData.target;
-        //Se existir um destino (target), chama a função loadScene() para carregar uma nova cena.
-        if (target) loadScene(target);
+    if (!renderer.xr.isPresenting) {
+        camera.quaternion.copy(savedCameraQuaternion);
     }
 }
 
-// Clique com mouse e celular
+// Evento de clique com controle VR
+function onSelectStart(event) {
+    const controller = event.target;
+    tempMatrix.identity().extractRotation(controller.matrixWorld);
+
+    raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+    raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+    const intersects = raycaster.intersectObjects(hotspotMeshes, false);
+    if (intersects.length > 0) {
+        const target = intersects[0].object.userData.target;
+        if (target) {
+            startFade(1, () => {
+                loadScene(target);
+                startFade(-1);
+            });
+        }
+    }
+}
+
+// Evento de clique do mouse ou toque
 function onPointerDown(event) {
     if (renderer.xr.isPresenting) return;
 
-    console.log('evento pointer');
-
-    let x, y;
-    if (event.pointerType === 'touch' || event.pointerType === 'pen') {
-        x = event.clientX;
-        y = event.clientY;
-    } else if (event.pointerType === 'mouse') {
-        console.log('toque do mouse')
-        x = event.clientX;
-        y = event.clientY;
-    }
-
-    mouse.x = (x / window.innerWidth) * 2 - 1;
-    mouse.y = -(y / window.innerHeight) * 2 + 1;
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
     raycaster.setFromCamera(mouse, camera);
     const intersects = raycaster.intersectObjects(hotspotMeshes, false);
     if (intersects.length > 0) {
         const target = intersects[0].object.userData.target;
-        if (target) loadScene(target);
+        if (target) {
+            startFade(1, () => {
+                loadScene(target);
+                startFade(-1);
+            });
+        }
     }
 }
 
-
-//Essa função faz com que a cena continue aparecendo do jeito certo mesmo quando a janela muda de tamanho.
+// Atualiza resolução da tela
 function onWindowResize() {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
+// Inicia o loop de animação
 function animate() {
     renderer.setAnimationLoop(render);
 }
 
+// Função de renderização
 function render() {
+    const delta = clock.getDelta(); // Tempo entre frames
+
+
+    if (fading) {
+        fadeOpacity += fadeDirection * delta * 2;
+        fadeOpacity = THREE.MathUtils.clamp(fadeOpacity, 0, 1);
+        fadePlane.material.opacity = fadeOpacity;
+
+        if ((fadeDirection === 1 && fadeOpacity >= 1) || (fadeDirection === -1 && fadeOpacity <= 0)) {
+            fading = false;
+            if (fadeCallback) {
+                const cb = fadeCallback;
+                fadeCallback = null;
+                cb();
+            }
+        }
+    }
+
+
+    fadePlane.position.copy(camera.position);
+    fadePlane.quaternion.copy(camera.quaternion);
+    fadePlane.translateZ(-0.5);
+
+
     if (!renderer.xr.isPresenting && controls) controls.update();
 
-    // Resetar todas as cores dos hotspots
-    hotspotMeshes.forEach(mesh => mesh.material.color.set(0xffff00));
+
+    hotspotMeshes.forEach(mesh => {
+        if (mesh.material.color) mesh.material.color.set(0xffff00);
+    });
+
 
     if (renderer.xr.isPresenting) {
         checkIntersection(controller1);
@@ -231,10 +267,7 @@ function render() {
     renderer.render(scene, camera);
 }
 
-//A função 'checkIntersection' pega a posição e direção do controle.
-// Cria um raio invisível que sai da ponta do controle e vai na direção que ele está apontando.
-// Verifica se esse raio acerta algum objeto (hotspot).
-// Se acertar, muda a cor do objeto atingido para vermelho.
+
 function checkIntersection(controller) {
     tempMatrix.identity().extractRotation(controller.matrixWorld);
     raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
@@ -242,6 +275,7 @@ function checkIntersection(controller) {
 
     const intersects = raycaster.intersectObjects(hotspotMeshes, false);
     if (intersects.length > 0) {
-        intersects[0].object.material.color.set(0xff0000);
+        const material = intersects[0].object.material;
+        if (material.color) material.color.set(0xff0000);
     }
 }
