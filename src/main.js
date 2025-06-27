@@ -4,6 +4,9 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { scenesData } from './scenes/scenesData.js';
 
 
+
+
+
 let camera, scene, renderer;
 let controller1, controller2;
 let controls;
