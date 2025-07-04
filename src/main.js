@@ -1,56 +1,88 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/examples/jsm/webxr/VRButton.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { scenesData } from './scenes/scenesData.js';
+import { carregarTodasAsCenas } from './scenes/scenesFetcher.js';
 
-
-
-
-
-let camera, scene, renderer;
-let controller1, controller2;
-let controls;
-let raycaster, tempMatrix;
+let camera, scene, renderer, controls, raycaster, tempMatrix;
 let hotspotMeshes = [];
 let currentPanoramaMesh = null;
-
-
 let fadePlane, fadeOpacity = 0, fading = false, fadeDirection = 1, fadeCallback = null;
 const clock = new THREE.Clock();
-
-
 const mouse = new THREE.Vector2();
 let savedCameraQuaternion = new THREE.Quaternion();
+let scenesData = {};
+let controller1, controller2;
 
+const textureCache = {};
+const textureLoader = new THREE.TextureLoader();
 
 init();
-loadScene('panorama0');
+
+// Registra cenas recursivamente na cena geral
+function registrarCenasRecursivamente(cena) {
+    if (!cena || scenesData[`panorama${cena.id}`]) return;
+    scenesData[`panorama${cena.id}`] = cena;
+    for (const hotspot of cena.hotspots || []) {
+        if (hotspot.cena_destino) {
+            registrarCenasRecursivamente(hotspot.cena_destino);
+        }
+    }
+}
+
+// Pré-carrega as texturas para evitar delays no render
+async function preloadTextures(cena) {
+    if (!cena || textureCache[`panorama${cena.id}`]) return;
+
+    textureCache[`panorama${cena.id}`] = await textureLoader.loadAsync(cena.image);
+
+    for (const hotspot of cena.hotspots || []) {
+        if (hotspot.icon && !textureCache[hotspot.icon]) {
+            textureCache[hotspot.icon] = await textureLoader.loadAsync(hotspot.icon);
+        }
+        if (hotspot.cena_destino) {
+            await preloadTextures(hotspot.cena_destino);
+        }
+    }
+}
+
+// Histórico simples para manter cenas visitadas
+function salvarHistoricoCena(cenaId) {
+    let historico = JSON.parse(localStorage.getItem('historicoCenas') || '[]');
+    if (!historico.includes(cenaId)) {
+        historico.push(cenaId);
+        localStorage.setItem('historicoCenas', JSON.stringify(historico));
+    }
+}
+
+
+// Carrega a cena inicial (id 1), registra cenas e pré-carrega texturas
+carregarTodasAsCenas(1).then(async data => {
+    if (data) {
+        registrarCenasRecursivamente(data);
+        await preloadTextures(data);
+        loadScene(`panorama${data.id}`);
+    }
+});
+
 animate();
 
 function init() {
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
 
-    // Câmera do usuário
     camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
-    camera.position.set(0, 1.6, 0); // Altura média dos olhos
-    camera.lookAt(new THREE.Vector3(0, 1.6, -1)); // Olhar para frente
+    camera.position.set(0, 1.6, 0);
+    camera.lookAt(new THREE.Vector3(0, 1.6, -1));
 
-
-    const light = new THREE.HemisphereLight(0xffffff, 0x444444);
-    scene.add(light);
-
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444));
 
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.xr.enabled = true; // Ativa XR (VR)
+    renderer.xr.enabled = true;
     renderer.xr.setReferenceSpaceType('local-floor');
-
-
     document.body.appendChild(renderer.domElement);
     document.body.appendChild(VRButton.createButton(renderer));
 
-    // Controles de mouse (modo não-VR)
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
@@ -58,14 +90,12 @@ function init() {
     controls.maxDistance = 100;
     controls.dampingFactor = 0.2;
     controls.rotateSpeed = -0.3;
-    controls.target.set(0, 1.6, -1); // Olhar fixo para frente
+    controls.target.set(0, 1.6, -1);
     controls.update();
 
-    // Raycaster para detectar cliques nos hotspots
     raycaster = new THREE.Raycaster();
     tempMatrix = new THREE.Matrix4();
 
-    // Controladores VR
     controller1 = renderer.xr.getController(0);
     controller1.addEventListener('selectstart', onSelectStart);
     scene.add(controller1);
@@ -74,7 +104,6 @@ function init() {
     controller2.addEventListener('selectstart', onSelectStart);
     scene.add(controller2);
 
-    // Linhas laser nos controles VR
     [controller1, controller2].forEach(controller => {
         const geometryLine = new THREE.BufferGeometry().setFromPoints([
             new THREE.Vector3(0, 0, 0),
@@ -87,7 +116,7 @@ function init() {
         controller.add(line);
     });
 
-
+    // Plano preto para fade
     const fadeGeometry = new THREE.PlaneGeometry(2, 2);
     const fadeMaterial = new THREE.MeshBasicMaterial({
         color: 0x000000,
@@ -101,18 +130,15 @@ function init() {
     fadePlane.frustumCulled = false;
     scene.add(fadePlane);
 
-
     window.addEventListener('resize', onWindowResize);
     window.addEventListener('pointerdown', onPointerDown);
 }
-
 
 function startFade(direction, callback) {
     fadeDirection = direction;
     fadeCallback = callback;
     fading = true;
 }
-
 
 function loadScene(sceneName) {
     const data = scenesData[sceneName];
@@ -121,53 +147,74 @@ function loadScene(sceneName) {
         return;
     }
 
-
     savedCameraQuaternion.copy(camera.quaternion);
 
+    salvarHistoricoCena(data.id);
 
     if (currentPanoramaMesh) {
         scene.remove(currentPanoramaMesh);
-        currentPanoramaMesh.geometry.dispose();
-        if (currentPanoramaMesh.material.map) currentPanoramaMesh.material.map.dispose();
-        currentPanoramaMesh.material.dispose();
+        disposeMesh(currentPanoramaMesh);
         currentPanoramaMesh = null;
     }
 
-    // Remove hotspots antigos
-    hotspotMeshes.forEach(mesh => {
-        scene.remove(mesh);
-        if (mesh.geometry) mesh.geometry.dispose();
-        if (mesh.material) mesh.material.dispose();
-    });
+    hotspotMeshes.forEach(mesh => disposeMesh(mesh));
     hotspotMeshes = [];
 
-
+    // Geometria esférica invertida para panorama
     const geometry = new THREE.SphereGeometry(50, 128, 128);
-    geometry.scale(-1, 1, 1); // Inverter
+    geometry.scale(-1, 1, 1);
 
-
-    const texture = new THREE.TextureLoader().load(data.image);
+    // Textura da cena carregada no cache
+    const texture = textureCache[`panorama${data.id}`];
+    if (!texture) {
+        console.warn(`Textura não encontrada para a cena: ${sceneName}`);
+        return;
+    }
     const material = new THREE.MeshBasicMaterial({ map: texture });
+
     currentPanoramaMesh = new THREE.Mesh(geometry, material);
     currentPanoramaMesh.userData.ignoreRaycast = true;
     scene.add(currentPanoramaMesh);
 
+    // Distribui hotspots em círculo ao redor do usuário
+    const totalHotspots = data.hotspots.length;
+    const radius = 20;
 
-    data.hotspots.forEach(hotspot => {
-        let material;
-        if (hotspot.icon) {
-            const hotspotTexture = new THREE.TextureLoader().load(hotspot.icon);
-            material = new THREE.SpriteMaterial({ map: hotspotTexture, transparent: true, alphaTest: 0.01 });
+    data.hotspots.forEach((hotspot, index) => {
+        let mat;
+        if (hotspot.icon && textureCache[hotspot.icon]) {
+            mat = new THREE.SpriteMaterial({ map: textureCache[hotspot.icon], transparent: true, alphaTest: 0.01 });
         } else {
-            material = new THREE.SpriteMaterial({ color: 0xffff00 });
+            mat = new THREE.SpriteMaterial({ color: 0xffff00 });
         }
 
-        const sprite = new THREE.Sprite(material);
-        sprite.position.set(hotspot.position.x, hotspot.position.y, hotspot.position.z);
+        const sprite = new THREE.Sprite(mat);
+
+        //usa posição real do banco dos hotspots, para mudar a posição
+        //deve mudar no banco
+        if (
+            typeof hotspot.pos_x === 'number' &&
+            typeof hotspot.pos_y === 'number' &&
+            typeof hotspot.pos_z === 'number'
+        ) {
+            sprite.position.set(hotspot.pos_x, hotspot.pos_y, hotspot.pos_z);
+        } else {
+            // fallback: posição em círculo
+            const angle = (index / data.hotspots.length) * Math.PI * 2;
+            const radius = 20;
+            const x = Math.cos(angle) * radius;
+            const y = 5;
+            const z = Math.sin(angle) * radius;
+            sprite.position.set(x, y, z);
+        }
+
         sprite.scale.set(2.5, 2.5, 1);
         sprite.userData.target = hotspot.target;
         hotspotMeshes.push(sprite);
         scene.add(sprite);
+        console.log("Hotspot recebido:", hotspot);
+        console.log("Hotspot pos:", hotspot.pos_x, hotspot.pos_y, hotspot.pos_z);
+
     });
 
 
@@ -176,14 +223,11 @@ function loadScene(sceneName) {
     }
 }
 
-// Evento de clique com controle VR
 function onSelectStart(event) {
     const controller = event.target;
     tempMatrix.identity().extractRotation(controller.matrixWorld);
-
     raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
     raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
-
     const intersects = raycaster.intersectObjects(hotspotMeshes, false);
     if (intersects.length > 0) {
         const target = intersects[0].object.userData.target;
@@ -196,13 +240,10 @@ function onSelectStart(event) {
     }
 }
 
-// Evento de clique do mouse ou toque
 function onPointerDown(event) {
     if (renderer.xr.isPresenting) return;
-
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-
     raycaster.setFromCamera(mouse, camera);
     const intersects = raycaster.intersectObjects(hotspotMeshes, false);
     if (intersects.length > 0) {
@@ -216,28 +257,23 @@ function onPointerDown(event) {
     }
 }
 
-// Atualiza resolução da tela
 function onWindowResize() {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
-// Inicia o loop de animação
 function animate() {
     renderer.setAnimationLoop(render);
 }
 
-// Função de renderização
 function render() {
-    const delta = clock.getDelta(); // Tempo entre frames
-
+    const delta = clock.getDelta();
 
     if (fading) {
         fadeOpacity += fadeDirection * delta * 2;
         fadeOpacity = THREE.MathUtils.clamp(fadeOpacity, 0, 1);
         fadePlane.material.opacity = fadeOpacity;
-
         if ((fadeDirection === 1 && fadeOpacity >= 1) || (fadeDirection === -1 && fadeOpacity <= 0)) {
             fading = false;
             if (fadeCallback) {
@@ -248,19 +284,15 @@ function render() {
         }
     }
 
-
     fadePlane.position.copy(camera.position);
     fadePlane.quaternion.copy(camera.quaternion);
     fadePlane.translateZ(-0.5);
 
-
     if (!renderer.xr.isPresenting && controls) controls.update();
-
 
     hotspotMeshes.forEach(mesh => {
         if (mesh.material.color) mesh.material.color.set(0xffff00);
     });
-
 
     if (renderer.xr.isPresenting) {
         checkIntersection(controller1);
@@ -270,15 +302,20 @@ function render() {
     renderer.render(scene, camera);
 }
 
-
 function checkIntersection(controller) {
     tempMatrix.identity().extractRotation(controller.matrixWorld);
     raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
     raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
-
     const intersects = raycaster.intersectObjects(hotspotMeshes, false);
     if (intersects.length > 0) {
         const material = intersects[0].object.material;
         if (material.color) material.color.set(0xff0000);
     }
+}
+
+function disposeMesh(mesh) {
+    if (mesh.geometry) mesh.geometry.dispose();
+    if (mesh.material?.map) mesh.material.map.dispose();
+    if (mesh.material) mesh.material.dispose();
+    scene.remove(mesh);
 }
