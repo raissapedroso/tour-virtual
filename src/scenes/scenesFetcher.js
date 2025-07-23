@@ -35,6 +35,9 @@ export async function carregarTodasAsCenas(idCena, cenasCarregadas = new Set()) 
             pos_x,
             pos_y,
             pos_z,
+            entrada_rotacao_y,
+            yaw,
+            pitch,
             cena_destino (
                 id,
                 caminho_imagem,
@@ -62,7 +65,7 @@ export async function carregarTodasAsCenas(idCena, cenasCarregadas = new Set()) 
             return {
                 name: hotspot.descricao,
                 target: hotspot.cena_destino ? `panorama${hotspot.cena_destino.id}` : null,
-                icon: 'click.png',
+                icon: 'icone9.png',
                 pos_x: hotspot.pos_x,
                 pos_y: hotspot.pos_y,
                 pos_z: hotspot.pos_z,
