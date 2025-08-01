@@ -1,4 +1,3 @@
-// Importa as dependências principais do Three.js
 import * as THREE from 'three';
 import { VRButton } from 'three/examples/jsm/webxr/VRButton.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -6,9 +5,11 @@ import { XRControllerModelFactory } from 'three/examples/jsm/webxr/XRControllerM
 import { XRHandModelFactory } from 'three/examples/jsm/webxr/XRHandModelFactory.js';
 import { carregarTodasAsCenas } from './scenes/scenesFetcher.js';
 
-// Variáveis principais da cena
-let camera, scene, renderer, controls, raycaster, tempMatrix;
-let hotspotMeshes = [], currentPanoramaMesh = null;
+// Variáveis principais
+let camera, scene, renderer, controls;
+let raycaster, tempMatrix;
+let hotspotMeshes = [];
+let currentPanoramaMesh = null;
 let fadePlane, fadeOpacity = 0, fading = false, fadeDirection = 1, fadeCallback = null;
 const clock = new THREE.Clock();
 const mouse = new THREE.Vector2();
@@ -16,12 +17,13 @@ let savedCameraQuaternion = new THREE.Quaternion();
 let scenesData = {};
 let controller1, controller2;
 let descricaoSprite = null;
+let cenaAtualId;
 const textureCache = {};
 const textureLoader = new THREE.TextureLoader();
 
 init();
 
-// Registra cenas recursivamente com base em seus hotspots
+// Registra cenas recursivamente pelo id, para evitar duplicação
 function registrarCenasRecursivamente(cena) {
     if (!cena || scenesData[`panorama${cena.id}`]) return;
     scenesData[`panorama${cena.id}`] = cena;
@@ -32,21 +34,18 @@ function registrarCenasRecursivamente(cena) {
     }
 }
 
-// Pré-carrega todas as texturas de uma cena e suas dependências
+// Pré-carrega texturas de panorama e ícones dos hotspots
 async function preloadTextures(cena) {
     if (!cena || textureCache[`panorama${cena.id}`]) return;
 
-    // Carrega textura do panorama
     const panoramaTexture = await textureLoader.loadAsync(cena.image);
     panoramaTexture.encoding = THREE.sRGBEncoding;
     panoramaTexture.minFilter = THREE.LinearFilter;
     panoramaTexture.magFilter = THREE.LinearFilter;
     panoramaTexture.generateMipmaps = false;
     panoramaTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-
     textureCache[`panorama${cena.id}`] = panoramaTexture;
 
-    // Carrega ícones de hotspots
     for (const hotspot of cena.hotspots || []) {
         if (hotspot.icon && !textureCache[hotspot.icon]) {
             const iconTexture = await textureLoader.loadAsync(hotspot.icon);
@@ -59,8 +58,9 @@ async function preloadTextures(cena) {
     }
 }
 
-// Salva o ID da cena no histórico no localStorage
+// Salva o histórico de cenas no localStorage (sem duplicação)
 function salvarHistoricoCena(cenaId) {
+    //historico salva um array das cenas já visitadas
     let historico = JSON.parse(localStorage.getItem('historicoCenas') || '[]');
     if (!historico.includes(cenaId)) {
         historico.push(cenaId);
@@ -68,27 +68,35 @@ function salvarHistoricoCena(cenaId) {
     }
 }
 
-// Carrega as cenas e inicia com a primeira cena (id 1)
+// Carrega cenas e inicia pela primeira
 carregarTodasAsCenas(1).then(async data => {
     if (data) {
         registrarCenasRecursivamente(data);
         await preloadTextures(data);
         loadScene(`panorama${data.id}`);
+
+        // Esconde tela de carregamento após carregar primeira cena
+        const loadingScreen = document.getElementById('loading-screen');
+        if (loadingScreen) {
+            loadingScreen.style.display = 'none';
+        }
     }
 });
 
-// Inicia o loop de animação
+// Inicia animação
 animate();
 
-// Função principal de configuração do ambiente 3D
 function init() {
+    // Cena
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
 
+    // Câmera
     camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
     camera.position.set(0, 1.6, 0);
     camera.lookAt(new THREE.Vector3(0, 1.6, -1));
 
+    // Renderizador
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.xr.enabled = true;
@@ -98,6 +106,7 @@ function init() {
     document.body.appendChild(renderer.domElement);
     document.body.appendChild(VRButton.createButton(renderer));
 
+    // Controles Orbit para modo não-VR
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
@@ -108,10 +117,14 @@ function init() {
     controls.target.set(0, 1.6, -1);
     controls.update();
 
+    // Raycaster
     raycaster = new THREE.Raycaster();
     tempMatrix = new THREE.Matrix4();
 
-    // Controladores VR básicos
+    // Controladores VR com eventos e laser visível
+    const controllerModelFactory = new XRControllerModelFactory();
+    const handModelFactory = new XRHandModelFactory();
+
     controller1 = renderer.xr.getController(0);
     controller1.addEventListener('selectstart', onSelectStart);
     scene.add(controller1);
@@ -120,23 +133,28 @@ function init() {
     controller2.addEventListener('selectstart', onSelectStart);
     scene.add(controller2);
 
-    // Linhas de apontamento dos controladores
-    [controller1, controller2].forEach(controller => {
-        const geometryLine = new THREE.BufferGeometry().setFromPoints([
+    // Adiciona laser visual
+    function addLaser(controller) {
+        const geometry = new THREE.BufferGeometry().setFromPoints([
             new THREE.Vector3(0, 0, 0),
             new THREE.Vector3(0, 0, -1)
         ]);
-        const materialLine = new THREE.LineBasicMaterial({ color: 0xffffff });
-        const line = new THREE.Line(geometryLine, materialLine);
-        line.name = 'ray';
-        line.scale.z = 10;
+        const material = new THREE.LineBasicMaterial({
+            color: 0xffffff,
+            linewidth: 2,
+            transparent: true,
+            opacity: 0.9
+        });
+        const line = new THREE.Line(geometry, material);
+        line.name = 'laser';
+        line.scale.z = 100;
         controller.add(line);
-    });
+    }
 
-    // Controladores 3D e mãos visíveis
-    const controllerModelFactory = new XRControllerModelFactory();
-    const handModelFactory = new XRHandModelFactory();
+    addLaser(controller1);
+    addLaser(controller2);
 
+    // Control grips (modelo visual do controle físico)
     const controllerGrip1 = renderer.xr.getControllerGrip(0);
     controllerGrip1.add(controllerModelFactory.createControllerModel(controllerGrip1));
     scene.add(controllerGrip1);
@@ -145,6 +163,7 @@ function init() {
     controllerGrip2.add(controllerModelFactory.createControllerModel(controllerGrip2));
     scene.add(controllerGrip2);
 
+    // Mãos (opcional)
     const hand1 = renderer.xr.getHand(0);
     hand1.add(handModelFactory.createHandModel(hand1));
     scene.add(hand1);
@@ -153,7 +172,7 @@ function init() {
     hand2.add(handModelFactory.createHandModel(hand2));
     scene.add(hand2);
 
-    // Plano de fade preto
+    // Plano preto para transição com fade
     const fadeGeometry = new THREE.PlaneGeometry(2, 2);
     const fadeMaterial = new THREE.MeshBasicMaterial({
         color: 0x000000,
@@ -167,7 +186,7 @@ function init() {
     fadePlane.frustumCulled = false;
     scene.add(fadePlane);
 
-    // Descrição de hotspots (sprite)
+    // Sprite de descrição
     const canvas = document.createElement('canvas');
     canvas.width = 512;
     canvas.height = 128;
@@ -183,6 +202,7 @@ function init() {
     descricaoSprite.visible = false;
     scene.add(descricaoSprite);
 
+    // Eventos
     window.addEventListener('resize', onWindowResize);
     window.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('mousemove', (event) => {
@@ -191,28 +211,28 @@ function init() {
     });
 }
 
-// Função auxiliar para atualizar o texto do sprite
+// Atualiza o texto do sprite com quebra de linhas e fundo arredondado
 function atualizarDescricaoTexto(texto) {
     const canvas = descricaoSprite.material.map.image;
     const ctx = canvas.getContext('2d');
 
-    // Definir tamanho fixo do canvas (não muda)
     const width = 512;
     const height = 128;
     canvas.width = width;
     canvas.height = height;
 
-    // Limpar o canvas
     ctx.clearRect(0, 0, width, height);
 
-    // Configurações de fonte (fixa, legível, sem distorção)
     const fontSize = 32;
+    const paddingX = 20;
+    const paddingY = 15;
+    const radius = 18;
+
     ctx.font = `${fontSize}px Arial, sans-serif`;
     ctx.textBaseline = 'top';
     ctx.textAlign = 'center';
-    ctx.fillStyle = 'white';
 
-    // Quebra de linha simples
+    // Dividir texto em linhas
     const maxWidth = width * 0.9;
     const words = texto.split(' ');
     const lines = [];
@@ -229,26 +249,29 @@ function atualizarDescricaoTexto(texto) {
     }
     lines.push(currentLine.trim());
 
-    // Medir largura e altura do texto para ajustar fundo
+    // Medidas da caixa
     let maxLineWidth = 0;
     lines.forEach(line => {
         const lineWidth = ctx.measureText(line).width;
         if (lineWidth > maxLineWidth) maxLineWidth = lineWidth;
     });
 
-    const lineHeight = fontSize * 1.2;
+    const lineHeight = fontSize * 1.3;
     const textHeight = lines.length * lineHeight;
-    const paddingX = 15;
-    const paddingY = 10;
-
     const boxWidth = maxLineWidth + paddingX * 2;
     const boxHeight = textHeight + paddingY * 2;
     const boxX = (width - boxWidth) / 2;
     const boxY = (height - boxHeight) / 2;
 
-    // Fundo preto arredondado ajustado ao texto
-    const radius = 12;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+    // Fundo com gradiente e borda suave
+    const gradient = ctx.createLinearGradient(0, boxY, 0, boxY + boxHeight);
+    gradient.addColorStop(0, 'rgba(30,30,30,0.9)');
+    gradient.addColorStop(1, 'rgba(10,10,10,0.9)');
+
+    ctx.fillStyle = gradient;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.lineWidth = 2;
+
     ctx.beginPath();
     ctx.moveTo(boxX + radius, boxY);
     ctx.lineTo(boxX + boxWidth - radius, boxY);
@@ -261,71 +284,75 @@ function atualizarDescricaoTexto(texto) {
     ctx.quadraticCurveTo(boxX, boxY, boxX + radius, boxY);
     ctx.closePath();
     ctx.fill();
+    ctx.stroke();
 
-    // Desenhar texto linha por linha centralizado verticalmente
+    // Desenhar texto com sombra
     ctx.fillStyle = 'white';
+    ctx.shadowColor = 'black';
+    ctx.shadowBlur = 6;
+    ctx.shadowOffsetX = 2;
+    ctx.shadowOffsetY = 2;
+
     for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const x = width / 2;
-        const y = boxY + paddingY + i * lineHeight;
-        ctx.fillText(line, x, y);
+        ctx.fillText(lines[i], width / 2, boxY + paddingY + i * lineHeight);
     }
 
+    ctx.shadowColor = 'transparent'; // remove sombra para próximas renderizações
     descricaoSprite.material.map.needsUpdate = true;
 }
 
-// Inicia efeito de fade in/out
+// Controla efeito de fade in/out para transição entre cenas
 function startFade(direction, callback) {
     fadeDirection = direction;
     fadeCallback = callback;
     fading = true;
 }
 
-// Carrega e exibe uma cena com base no nome dela
-function loadScene(sceneName) {
+// Carrega uma cena com base no nome
+function loadScene(sceneName, cenaOrigemId) {
     const data = scenesData[sceneName];
     if (!data) {
         console.warn(`Cena "${sceneName}" não encontrada.`);
         return;
     }
+    cenaAtualId = data.id
+
     console.log('Carregando cena:', sceneName);
     console.log('entrada_rotacao_y recebida:', data.entrada_rotacao_y);
 
-    // Salva a rotação atual da câmera antes de mudar (para fallback)
     savedCameraQuaternion.copy(camera.quaternion);
-
-    // Salva o histórico de navegação
     salvarHistoricoCena(data.id);
 
-    // Remove o panorama anterior, se existir
+    // Remove panorama atual
     if (currentPanoramaMesh) {
         scene.remove(currentPanoramaMesh);
         disposeMesh(currentPanoramaMesh);
         currentPanoramaMesh = null;
     }
 
-    // Remove todos os hotspots anteriores
+    // Remove hotspots antigos
     hotspotMeshes.forEach(mesh => disposeMesh(mesh));
     hotspotMeshes = [];
 
-    // Cria a esfera panorâmica
+    // Cria geometria da esfera panorâmica invertida
     const geometry = new THREE.SphereGeometry(50, 128, 128);
     geometry.scale(-1, 1, 1);
 
-    // Recupera a textura da cena
     const texture = textureCache[`panorama${data.id}`];
     if (!texture) {
         console.warn(`Textura não encontrada para a cena: ${sceneName}`);
         return;
     }
 
-    // Cria o material e mesh do panorama
     const material = new THREE.MeshBasicMaterial({ map: texture });
     currentPanoramaMesh = new THREE.Mesh(geometry, material);
     currentPanoramaMesh.userData.ignoreRaycast = true;
     scene.add(currentPanoramaMesh);
 
-    // Adiciona os hotspots da cena
+    // Ajusta posição vertical da esfera conforme VR ou desktop
+    //currentPanoramaMesh.position.y = renderer.xr.isPresenting ? -1.6 : 0;
+
+    // Cria hotspots
     const radius = 20;
     data.hotspots.forEach((hotspot, index) => {
         let mat;
@@ -337,24 +364,26 @@ function loadScene(sceneName) {
 
         const sprite = new THREE.Sprite(mat);
 
-        // Armazena dados úteis para o clique
         sprite.userData = {
             target: hotspot.target,
             descricao: hotspot.name,
-            entrada_rotacao_y: hotspot.entrada_rotacao_y // incluímos aqui!
+            entrada_rotacao_y: hotspot.entrada_rotacao_y
         };
-        console.log(hotspot.entrada_rotacao_y);
-        console.log('posição do hotspot x: ' + hotspot.pos_x);
-        console.log('posição do hotspot y: ' + hotspot.pos_y);
-        console.log('posição do hotspot z: ' + hotspot.pos_z);
 
+        // Posiciona hotspot
         if (
             typeof hotspot.pos_x === 'number' &&
             typeof hotspot.pos_y === 'number' &&
             typeof hotspot.pos_z === 'number'
         ) {
             sprite.position.set(hotspot.pos_x, hotspot.pos_y, hotspot.pos_z);
+
+            // Ajusta altura do hotspot em VR
+            if (renderer.xr.isPresenting) {
+                sprite.position.y -= 1.6;
+            }
         } else {
+            // Posiciona em círculo caso não haja posição explícita
             const angle = (index / data.hotspots.length) * Math.PI * 2;
             const x = Math.cos(angle) * radius;
             const y = 5;
@@ -367,28 +396,34 @@ function loadScene(sceneName) {
         scene.add(sprite);
     });
 
-    console.log('aaaaaaa');
-    console.log('cena: ' + sceneName);
+    console.log('Cena carregada:', sceneName);
 
-    // Aplica a rotação da câmera ao entrar na nova cena (se não estiver em modo VR)
+    // Aplica rotação inicial da câmera para orientar panorama
     if (!renderer.xr.isPresenting) {
-        // Define um valor padrão para entrada_rotacao_y caso seja null ou undefined
-        let rotacaoY = 0; // padrão (0 radianos)
-        if (typeof data.entrada_rotacao_y === 'number') {
-            rotacaoY = data.entrada_rotacao_y;
+        let rotacaoY = 0;
+
+        if (cenaOrigemId) {
+            const hotspotEntrada = data.hotspots.find(hotspot => {
+                const destinoId = hotspot.cena_destino?.id;
+                return destinoId === cenaOrigemId;
+            });
+
+            if (hotspotEntrada) {
+                rotacaoY = calcularRotacaoYDoHotspot(hotspotEntrada.pos_x, hotspotEntrada.pos_y, hotspotEntrada.pos_z);
+                console.log(`Rotação Y calculada a partir do hotspot de entrada: ${rotacaoY.toFixed(3)} rad`);
+            } else {
+                rotacaoY = (typeof data.entrada_rotacao_y === 'number') ? data.entrada_rotacao_y : Math.PI / 2;
+                console.warn(`Hotspot de entrada para cena ${cenaOrigemId} não encontrado. Usando entrada_rotacao_y ou padrão.`);
+            }
         } else {
-            console.warn(`entrada_rotacao_y está nulo ou indefinido para a cena ${sceneName}. Usando padrão 0.`);
+            rotacaoY = (typeof data.entrada_rotacao_y === 'number') ? data.entrada_rotacao_y : Math.PI / 2;
         }
 
-        const euler = new THREE.Euler(0, rotacaoY, 0, 'YXZ');
-        camera.quaternion.setFromEuler(euler);
-        console.log('Aplicando rotação da entrada:', rotacaoY);
+        aplicarRotacaoCamera(rotacaoY);
     }
 }
 
-
-
-// Clique no controle VR
+// Evento de clique nos controles VR
 function onSelectStart(event) {
     const controller = event.target;
     tempMatrix.identity().extractRotation(controller.matrixWorld);
@@ -399,23 +434,24 @@ function onSelectStart(event) {
         const target = intersects[0].object.userData.target;
         if (target) {
             startFade(1, () => {
-                loadScene(target);
+                loadScene(target,cenaAtualId);
                 startFade(-1);
             });
         }
     }
 }
 
-// Clique no mouse (modo não VR)
+// Clique no mouse (modo desktop)
 function onPointerDown(event) {
     if (renderer.xr.isPresenting) return;
+
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
     const intersects = raycaster.intersectObjects(hotspotMeshes, false);
+
     if (intersects.length > 0) {
         const target = intersects[0].object.userData.target;
-        console.log(target)
         if (target) {
             startFade(1, () => {
                 loadScene(target);
@@ -423,33 +459,46 @@ function onPointerDown(event) {
             });
         }
     }
-    console.log('Hotspot clicado:', hotspot);
-    console.log('Cena destino:', target);
-    console.log('Yaw do hotspot:', yaw);
-
 }
 
-// Ajusta proporções da câmera ao redimensionar
+// Ajusta tamanho do canvas e câmera ao redimensionar
 function onWindowResize() {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
-// Inicia o render loop com suporte a XR
+// Calcula o ângulo Y entre o hotspot e a origem
+function calcularRotacaoYDoHotspot(pos_x, pos_y, pos_z) {
+    //Faz com que ao entrar numa cena clicando num hotspot,
+    // a câmera esteja olhando na direção do hotspot de onde o usuário veio
+    const dir = new THREE.Vector3(pos_x, pos_y, pos_z).normalize();
+    return Math.atan2(dir.x, dir.z);
+}
+
+// Aplica rotação à câmera via quaternion
+function aplicarRotacaoCamera(rotacaoY) {
+    const quat = new THREE.Quaternion();
+    quat.setFromEuler(new THREE.Euler(0, rotacaoY, 0));
+    camera.quaternion.copy(quat);
+
+    console.log(`>> Câmera rotacionada para Y: ${rotacaoY.toFixed(3)} rad`);
+}
+// Loop de animação com suporte a XR
 function animate() {
     renderer.setAnimationLoop(render);
 }
 
-// Função que renderiza cada frame
+// Renderiza quadro a quadro
 function render() {
     const delta = clock.getDelta();
 
-    // Animação do fade in/out
+    // Atualiza fade in/out
     if (fading) {
         fadeOpacity += fadeDirection * delta * 2;
         fadeOpacity = THREE.MathUtils.clamp(fadeOpacity, 0, 1);
         fadePlane.material.opacity = fadeOpacity;
+
         if ((fadeDirection === 1 && fadeOpacity >= 1) || (fadeDirection === -1 && fadeOpacity <= 0)) {
             fading = false;
             if (fadeCallback) {
@@ -460,28 +509,54 @@ function render() {
         }
     }
 
-    // Sempre posiciona o plano de fade à frente da câmera
+    // Mantém plano de fade sempre à frente da câmera
     fadePlane.position.copy(camera.position);
     fadePlane.quaternion.copy(camera.quaternion);
     fadePlane.translateZ(-0.5);
 
     if (!renderer.xr.isPresenting && controls) controls.update();
 
-    // Detecta se o mouse ou controle VR está apontando para algum hotspot
+    // Variável para armazenar o hotspot que está sendo apontado atualmente (pelo laser ou mouse)
     let intersected = null;
+
+// Verifica se está em modo VR (óculos)
     if (renderer.xr.isPresenting) {
-        tempMatrix.identity().extractRotation(controller1.matrixWorld);
-        raycaster.ray.origin.setFromMatrixPosition(controller1.matrixWorld);
-        raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
-        const intersects = raycaster.intersectObjects(hotspotMeshes, false);
-        if (intersects.length > 0) intersected = intersects[0].object;
+        // Para cada um dos dois controladores VR (esquerdo e direito)
+        [controller1, controller2].forEach(controller => {
+            // Prepara uma matriz temporária para extrair a rotação do controle
+            tempMatrix.identity().extractRotation(controller.matrixWorld);
+
+            // Define a origem do raio (raycaster) como a posição do controle no mundo
+            raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+
+            // Define a direção do raio como "para frente" do controle, considerando sua rotação
+            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+            // Detecta interseções entre o raio e os hotspots
+            const intersects = raycaster.intersectObjects(hotspotMeshes, false);
+
+            // Se houver interseção e ainda não foi definido um `intersected`, usa esse objeto
+            if (intersects.length > 0 && !intersected) {
+                intersected = intersects[0].object; // O hotspot que está sendo apontado pelo controle
+            }
+        });
     } else {
+        // Modo não-VR (desktop): calcula a direção do raio com base na posição do mouse na tela
         raycaster.setFromCamera(mouse, camera);
+
+        // Verifica se o raio colide com algum hotspot na cena
         const intersects = raycaster.intersectObjects(hotspotMeshes, false);
-        if (intersects.length > 0) intersected = intersects[0].object;
+
+        // Se houver interseção, armazena o primeiro objeto encontrado como `intersected`
+        if (intersects.length > 0) {
+            intersected = intersects[0].object; // O hotspot que está sob o ponteiro do mouse
+        }
     }
 
-    // Se houver hotspot sob o ponteiro, exibe a descrição
+
+
+
+    // Atualiza descrição do hotspot se houver
     if (intersected) {
         atualizarDescricaoTexto(intersected.userData.descricao || '');
         descricaoSprite.position.copy(intersected.position);
@@ -495,10 +570,12 @@ function render() {
     renderer.render(scene, camera);
 }
 
-// Remove malhas da cena e limpa memória
+// Remove geometria e materiais de malha para liberar memória
 function disposeMesh(mesh) {
     if (mesh.geometry) mesh.geometry.dispose();
-    if (mesh.material?.map) mesh.material.map.dispose();
-    if (mesh.material) mesh.material.dispose();
+    if (mesh.material) {
+        if (mesh.material.map) mesh.material.map.dispose();
+        mesh.material.dispose();
+    }
     scene.remove(mesh);
 }

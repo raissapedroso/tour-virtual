@@ -65,14 +65,17 @@ export async function carregarTodasAsCenas(idCena, cenasCarregadas = new Set()) 
             return {
                 name: hotspot.descricao,
                 target: hotspot.cena_destino ? `panorama${hotspot.cena_destino.id}` : null,
-                icon: 'icone9.png',
+                icon: 'icone8.png',
                 pos_x: hotspot.pos_x,
                 pos_y: hotspot.pos_y,
                 pos_z: hotspot.pos_z,
+                entrada_rotacao_y: hotspot.entrada_rotacao_y, // ✅ aqui!
                 cena_destino: cenaDestinoCompleta
             };
+
         })
     );
+
 
     return {
         id: cena.id,
