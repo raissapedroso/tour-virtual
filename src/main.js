@@ -1,12 +1,47 @@
+// Import required Three.js modules
 import * as THREE from 'three';
 import { VRButton } from 'three/examples/jsm/webxr/VRButton.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { XRControllerModelFactory } from 'three/examples/jsm/webxr/XRControllerModelFactory.js';
 import { XRHandModelFactory } from 'three/examples/jsm/webxr/XRHandModelFactory.js';
+import { DeviceOrientationCamera } from './controls/deviceOrientationControls.js';
 import { carregarTodasAsCenas } from './scenes/scenesFetcher.js';
 
+// Audio variables
+let audioListener, youtubeAudio, youtubePlayer, fallbackAudio, audioElement;
+let isAudioStarted = false;
+let isAudioInitialized = false;
+
+// YouTube video ID for background audio
+const YOUTUBE_VIDEO_ID = 'MYPVQccHhAQ'; // Video ID from https://youtu.be/MYPVQccHhAQ
+
+// Fallback audio file path
+const FALLBACK_AUDIO_PATH = '/audio/fallback_music.mp3';
+
+// Captura erros não tratados
+window.addEventListener('unhandledrejection', (event) => {
+    console.error('Erro não tratado em promessa:', event.reason, event);
+});
+
+// Funções para geração de cores nas descrições
+function hashString(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash;
+    }
+    return Math.abs(hash);
+}
+
+function getRgbaFromHash(hash, saturation = 0.7, lightness = 0.3, alpha = 0.9) {
+    const hue = (hash % 360) / 360;
+    const color = new THREE.Color().setHSL(hue, saturation, lightness);
+    return `rgba(${Math.floor(color.r * 255)}, ${Math.floor(color.g * 255)}, ${Math.floor(color.b * 255)}, ${alpha})`;
+}
+
 // Variáveis principais
-let camera, scene, renderer, controls;
+let camera, scene, renderer, controls, deviceOrientationCamera;
 let raycaster, tempMatrix;
 let hotspotMeshes = [];
 let currentPanoramaMesh = null;
@@ -20,141 +55,410 @@ let descricaoSprite = null;
 let cenaAtualId;
 const textureCache = {};
 const textureLoader = new THREE.TextureLoader();
+let controllerSetupInterval = null;
+let controllerSetupFrame = null;
+let deviceOrientationButton = null;
+let baseReferenceSpace = null;
+let sceneGroup;
+let needsHeightAdjustment = false;
+let originalCameraPosition = new THREE.Vector3(0, 0, 0);
 
 init();
 
-// Registra cenas recursivamente pelo id, para evitar duplicação
-function registrarCenasRecursivamente(cena) {
-    if (!cena || scenesData[`panorama${cena.id}`]) return;
-    scenesData[`panorama${cena.id}`] = cena;
-    for (const hotspot of cena.hotspots || []) {
-        if (hotspot.cena_destino) {
-            registrarCenasRecursivamente(hotspot.cena_destino);
-        }
-    }
-}
-
-// Pré-carrega texturas de panorama e ícones dos hotspots
-async function preloadTextures(cena) {
-    if (!cena || textureCache[`panorama${cena.id}`]) return;
-
-    const panoramaTexture = await textureLoader.loadAsync(cena.image);
-    panoramaTexture.encoding = THREE.sRGBEncoding;
-    panoramaTexture.minFilter = THREE.LinearFilter;
-    panoramaTexture.magFilter = THREE.LinearFilter;
-    panoramaTexture.generateMipmaps = false;
-    panoramaTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-    textureCache[`panorama${cena.id}`] = panoramaTexture;
-
-    for (const hotspot of cena.hotspots || []) {
-        if (hotspot.icon && !textureCache[hotspot.icon]) {
-            const iconTexture = await textureLoader.loadAsync(hotspot.icon);
-            iconTexture.encoding = THREE.sRGBEncoding;
-            textureCache[hotspot.icon] = iconTexture;
-        }
-        if (hotspot.cena_destino) {
-            await preloadTextures(hotspot.cena_destino);
-        }
-    }
-}
-
-// Salva o histórico de cenas no localStorage (sem duplicação)
-function salvarHistoricoCena(cenaId) {
-    //historico salva um array das cenas já visitadas
-    let historico = JSON.parse(localStorage.getItem('historicoCenas') || '[]');
-    if (!historico.includes(cenaId)) {
-        historico.push(cenaId);
-        localStorage.setItem('historicoCenas', JSON.stringify(historico));
-    }
-}
-
-// Carrega cenas e inicia pela primeira
 carregarTodasAsCenas(1).then(async data => {
-    if (data) {
-        registrarCenasRecursivamente(data);
-        await preloadTextures(data);
-        loadScene(`panorama${data.id}`);
-
-        // Esconde tela de carregamento após carregar primeira cena
-        const loadingScreen = document.getElementById('loading-screen');
-        if (loadingScreen) {
-            loadingScreen.style.display = 'none';
+    try {
+        if (data) {
+            registrarCenasRecursivamente(data);
+            await preloadTextures(data);
+            await loadScene(`panorama${data.id}`);
+            const loadingScreen = document.getElementById('loading-screen');
+            if (loadingScreen) {
+                loadingScreen.style.display = 'none';
+            }
+            preloadRemainingTextures(data);
+        } else {
+            console.error('Nenhuma cena inicial carregada.');
         }
+    } catch (error) {
+        console.error('Erro ao inicializar cenas:', error);
     }
+}).catch(error => {
+    console.error('Erro crítico ao carregar cena inicial:', error);
 });
 
-// Inicia animação
 animate();
 
 function init() {
-    // Cena
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
 
-    // Câmera
-    camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
-    camera.position.set(0, 1.6, 0);
-    camera.lookAt(new THREE.Vector3(0, 1.6, -1));
+    sceneGroup = new THREE.Group();
+    scene.add(sceneGroup);
 
-    // Renderizador
+    camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 0);
+    camera.lookAt(new THREE.Vector3(0, 0, -0.001));
+
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.xr.enabled = true;
     renderer.xr.setReferenceSpaceType('local-floor');
-    renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.NoToneMapping;
     document.body.appendChild(renderer.domElement);
-    document.body.appendChild(VRButton.createButton(renderer));
+    document.body.appendChild(VRButton.createButton(renderer, {
+        optionalFeatures: ['local-floor', 'local', 'hand-tracking']
+    }));
 
-    // Controles Orbit para modo não-VR
+    // Initialize audio with YouTube IFrame Player API and fallback
+    try {
+        // Create audio listener and attach to camera for spatial audio
+        audioListener = new THREE.AudioListener();
+        camera.add(audioListener);
+
+        // Create audio object for YouTube audio
+        youtubeAudio = new THREE.Audio(audioListener);
+
+        // Create audio object for fallback audio
+        fallbackAudio = new THREE.Audio(audioListener);
+        const audioLoader = new THREE.AudioLoader();
+
+        // Dynamically load YouTube IFrame API
+        const tag = document.createElement('script');
+        tag.src = 'https://www.youtube.com/iframe_api';
+        const firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+        // Function called by YouTube API when it's loaded
+        window.onYouTubeIframeAPIReady = () => {
+            try {
+                // Validate video ID
+                if (!YOUTUBE_VIDEO_ID || typeof YOUTUBE_VIDEO_ID !== 'string' || YOUTUBE_VIDEO_ID.trim() === '') {
+                    throw new Error('ID de vídeo do YouTube inválido ou ausente');
+                }
+
+                // Create a hidden div for the YouTube player
+                const playerDiv = document.createElement('div');
+                playerDiv.id = 'youtube-player';
+                playerDiv.style.display = 'none';
+                document.body.appendChild(playerDiv);
+
+                // Create an audio element for YouTube stream
+                audioElement = document.createElement('audio');
+                audioElement.id = 'youtube-audio';
+                audioElement.crossOrigin = 'anonymous';
+                document.body.appendChild(audioElement);
+
+                // Initialize YouTube player
+                youtubePlayer = new YT.Player('youtube-player', {
+                    height: '0', // No video display needed
+                    width: '0',
+                    videoId: YOUTUBE_VIDEO_ID,
+                    playerVars: {
+                        autoplay: 0, // Autoplay disabled to comply with browser policies
+                        loop: 1, // Enable looping
+                        playlist: YOUTUBE_VIDEO_ID, // Required for looping
+                        controls: 0, // Hide controls
+                        showinfo: 0, // Deprecated but included for compatibility
+                        rel: 0, // Prevent related videos
+                        modestbranding: 1, // Minimize YouTube branding
+                        origin: window.location.origin // Explicitly set origin
+                    },
+                    events: {
+                        onReady: (event) => {
+                            // Set up audio stream from YouTube player
+                            try {
+                                const stream = event.target.getIframe();
+                                audioElement.src = `https://www.youtube.com/embed/${YOUTUBE_VIDEO_ID}?autoplay=0&loop=1&playlist=${YOUTUBE_VIDEO_ID}&controls=0&showinfo=0&rel=0&modestbranding=1&enablejsapi=1`;
+                                const context = audioListener.context;
+                                const source = context.createMediaElementSource(audioElement);
+                                source.connect(youtubeAudio.getOutput());
+                                youtubeAudio.setLoop(true);
+                                youtubeAudio.setVolume(0.5); // Default volume (0.0 to 1.0)
+                                isAudioInitialized = true;
+                                console.log('Player de áudio do YouTube inicializado com ID:', YOUTUBE_VIDEO_ID);
+                            } catch (error) {
+                                console.error('Erro ao configurar stream de áudio do YouTube:', error);
+                                loadFallbackAudio();
+                            }
+                        },
+                        onError: (error) => {
+                            console.error('Erro no player do YouTube:', error);
+                            loadFallbackAudio();
+                        }
+                    }
+                });
+            } catch (error) {
+                console.error('Erro ao inicializar player do YouTube:', error);
+                loadFallbackAudio();
+            }
+        };
+
+        // Function to load fallback audio
+        function loadFallbackAudio() {
+            try {
+                audioLoader.load(FALLBACK_AUDIO_PATH, (buffer) => {
+                    fallbackAudio.setBuffer(buffer);
+                    fallbackAudio.setLoop(true);
+                    fallbackAudio.setVolume(0.5);
+                    isAudioInitialized = true;
+                    console.log('Áudio de fallback carregado com sucesso:', FALLBACK_AUDIO_PATH);
+                    youtubeAudio = fallbackAudio;
+                }, undefined, (error) => {
+                    console.error('Erro ao carregar áudio de fallback:', error);
+                    alert('Não foi possível carregar o áudio. O tour continuará sem áudio.');
+                });
+            } catch (error) {
+                console.error('Erro ao configurar áudio de fallback:', error);
+            }
+        }
+    } catch (error) {
+        console.error('Erro ao inicializar áudio:', error);
+        loadFallbackAudio();
+    }
+
+    // Volume control UI (simple slider)
+    const volumeSlider = document.createElement('input');
+    volumeSlider.type = 'range';
+    volumeSlider.min = '0';
+    volumeSlider.max = '100';
+    volumeSlider.value = '50'; // Matches default volume of 0.5
+    volumeSlider.style.position = 'absolute';
+    volumeSlider.style.top = '10px';
+    volumeSlider.style.right = '10px';
+    volumeSlider.addEventListener('input', () => {
+        const volume = volumeSlider.value / 100;
+        if (youtubeAudio) {
+            youtubeAudio.setVolume(volume);
+            if (audioElement) {
+                audioElement.volume = volume; // Sync with audio element
+            }
+            console.log(`Volume ajustado para: ${volume}`);
+        }
+    });
+    document.body.appendChild(volumeSlider);
+
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
-    controls.minDistance = 1;
-    controls.maxDistance = 100;
+    controls.enableZoom = false;
+    controls.minDistance = 0.001;
+    controls.maxDistance = 0.001;
     controls.dampingFactor = 0.2;
     controls.rotateSpeed = -0.3;
-    controls.target.set(0, 1.6, -1);
+    controls.target.set(0, 0, -0.001);
     controls.update();
 
-    // Raycaster
+    deviceOrientationCamera = new DeviceOrientationCamera(camera, renderer);
+    deviceOrientationCamera.enabled = false;
+    camera.controls = controls;
+
+    deviceOrientationButton = document.createElement('button');
+    deviceOrientationButton.textContent = 'Ativar Orientação por Dispositivo';
+    deviceOrientationButton.className = 'control-button';
+    const controlsContainer = document.getElementById('controls-container');
+    if (controlsContainer) {
+        controlsContainer.appendChild(deviceOrientationButton);
+    } else {
+        console.warn('Contêiner de controles não encontrado, adicionando ao body');
+        document.body.appendChild(deviceOrientationButton);
+    }
+    deviceOrientationButton.style.display = renderer.xr.isPresenting ? 'none' : 'block';
+
+    deviceOrientationButton.addEventListener('click', () => {
+        try {
+            if (deviceOrientationCamera.enabled) {
+                deviceOrientationCamera.enabled = false;
+                deviceOrientationButton.textContent = 'Ativar Orientação por Dispositivo';
+                controls.enabled = true;
+                controls.update();
+                console.log('Device orientation disabled, OrbitControls enabled');
+            } else {
+                deviceOrientationCamera.enabled = true;
+                deviceOrientationCamera.requestPermission();
+                deviceOrientationButton.textContent = 'Desativar Orientação por Dispositivo';
+                controls.enabled = false;
+                console.log('Device orientation enabled, OrbitControls disabled');
+            }
+        } catch (error) {
+            console.error('Erro ao alternar orientação por dispositivo:', error);
+        }
+    });
+
     raycaster = new THREE.Raycaster();
     tempMatrix = new THREE.Matrix4();
 
-    // Controladores VR com eventos e laser visível
     const controllerModelFactory = new XRControllerModelFactory();
     const handModelFactory = new XRHandModelFactory();
 
     controller1 = renderer.xr.getController(0);
-    controller1.addEventListener('selectstart', onSelectStart);
-    scene.add(controller1);
-
     controller2 = renderer.xr.getController(1);
-    controller2.addEventListener('selectstart', onSelectStart);
+    scene.add(controller1);
     scene.add(controller2);
 
-    // Adiciona laser visual
-    function addLaser(controller) {
-        const geometry = new THREE.BufferGeometry().setFromPoints([
-            new THREE.Vector3(0, 0, 0),
-            new THREE.Vector3(0, 0, -1)
-        ]);
-        const material = new THREE.LineBasicMaterial({
-            color: 0xffffff,
-            linewidth: 2,
-            transparent: true,
-            opacity: 0.9
-        });
-        const line = new THREE.Line(geometry, material);
-        line.name = 'laser';
-        line.scale.z = 100;
-        controller.add(line);
+    function setupController(controller, index) {
+        try {
+            controller.removeEventListener('selectstart', onSelectStart);
+            controller.removeEventListener('select', onSelectStart);
+
+            controller.addEventListener('selectstart', (event) => {
+                console.log(`selectstart disparado no controller${index + 1}:`, event);
+                onSelectStart(event);
+            });
+            controller.addEventListener('select', (event) => {
+                console.log(`select disparado no controller${index + 1}:`, event);
+                onSelectStart(event);
+            });
+
+            const existingLaser = controller.getObjectByName('laser');
+            if (existingLaser) {
+                controller.remove(existingLaser);
+                existingLaser.geometry.dispose();
+                existingLaser.material.dispose();
+            }
+
+            const geometry = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, 0, 0),
+                new THREE.Vector3(0, 0, -1)
+            ]);
+            const material = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 1 });
+            const line = new THREE.Line(geometry, material);
+            line.name = 'laser';
+            line.scale.z = 10;
+            line.visible = true;
+            controller.add(line);
+            console.log(`Laser configurado para controller${index + 1}:`, line);
+        } catch (error) {
+            console.error(`Erro ao configurar controlador ${index + 1}:`, error);
+        }
     }
 
-    addLaser(controller1);
-    addLaser(controller2);
+    function setupControllersWithRetry(session) {
+        try {
+            if (controllerSetupInterval) clearInterval(controllerSetupInterval);
+            if (controllerSetupFrame) cancelAnimationFrame(controllerSetupFrame);
 
-    // Control grips (modelo visual do controle físico)
+            let attempts = 0;
+            const maxAttempts = 40;
+
+            function checkControllers() {
+                try {
+                    if (session.inputSources.length > 0) {
+                        console.log('Input sources detectados:', session.inputSources);
+                        setupController(controller1, 0);
+                        setupController(controller2, 1);
+                        if (controllerSetupInterval) clearInterval(controllerSetupInterval);
+                        if (controllerSetupFrame) cancelAnimationFrame(controllerSetupFrame);
+                        controllerSetupInterval = null;
+                        controllerSetupFrame = null;
+                    } else {
+                        attempts++;
+                        console.log(`Tentativa ${attempts}: Nenhum input source detectado ainda`);
+                        if (attempts >= maxAttempts) {
+                            console.error('Falha ao detectar input sources após 20 segundos.');
+                            if (controllerSetupInterval) clearInterval(controllerSetupInterval);
+                            if (controllerSetupFrame) cancelAnimationFrame(controllerSetupFrame);
+                            controllerSetupInterval = null;
+                            controllerSetupFrame = null;
+                        } else {
+                            controllerSetupFrame = requestAnimationFrame(checkControllers);
+                        }
+                    }
+                } catch (error) {
+                    console.error('Erro ao verificar controladores:', error);
+                }
+            }
+
+            controllerSetupInterval = setInterval(checkControllers, 500);
+            checkControllers();
+        } catch (error) {
+            console.error('Erro ao configurar controladores com retry:', error);
+        }
+    }
+
+    renderer.xr.addEventListener('sessionstart', async () => {
+        try {
+            console.log('Sessão WebXR iniciada');
+            const session = renderer.xr.getSession();
+            setupControllersWithRetry(session);
+
+            let refSpace;
+            try {
+                refSpace = await session.requestReferenceSpace('local-floor');
+                console.log('Usando local-floor sem offset inicial');
+            } catch (error) {
+                console.warn('local-floor não suportado, fallback para local com offset');
+                refSpace = await session.requestReferenceSpace('local');
+                const initialOffsetTransform = new XRRigidTransform({ x: 0, y: -1.6, z: 0 });
+                refSpace = refSpace.getOffsetReferenceSpace(initialOffsetTransform);
+            }
+
+            baseReferenceSpace = refSpace;
+            renderer.xr.setReferenceSpace(baseReferenceSpace);
+
+            originalCameraPosition.copy(camera.position);
+            camera.position.set(0, 0, 0);
+
+            needsHeightAdjustment = true;
+
+            controls.enabled = false;
+            deviceOrientationCamera.enabled = false;
+            deviceOrientationButton.style.display = 'none';
+            deviceOrientationButton.textContent = 'Ativar Orientação por Dispositivo';
+
+            // Resume audio when entering VR mode
+            if (isAudioInitialized && isAudioStarted && youtubeAudio && !youtubeAudio.isPlaying) {
+                youtubeAudio.play();
+                if (audioElement) {
+                    audioElement.play();
+                }
+                console.log('Áudio retomado na sessão VR');
+            }
+        } catch (error) {
+            console.error('Erro ao iniciar sessão WebXR:', error);
+        }
+    });
+
+    renderer.xr.addEventListener('sessionend', () => {
+        try {
+            console.log('Sessão WebXR encerrada');
+            camera.position.copy(originalCameraPosition);
+
+            controls.enabled = true;
+            deviceOrientationCamera.enabled = false;
+            deviceOrientationButton.style.display = 'block';
+            deviceOrientationButton.textContent = 'Ativar Orientação por Dispositivo';
+            camera.quaternion.copy(savedCameraQuaternion);
+            [controller1, controller2].forEach((controller, index) => {
+                controller.removeEventListener('selectstart', onSelectStart);
+                controller.removeEventListener('select', onSelectStart);
+                const laser = controller.getObjectByName('laser');
+                if (laser) {
+                    controller.remove(laser);
+                    laser.geometry.dispose();
+                    laser.material.dispose();
+                }
+                console.log(`Controlador ${index + 1} limpo`);
+            });
+            if (controllerSetupInterval) clearInterval(controllerSetupInterval);
+            if (controllerSetupFrame) cancelAnimationFrame(controllerSetupFrame);
+            controllerSetupInterval = null;
+            controllerSetupFrame = null;
+            needsHeightAdjustment = false;
+
+            // Pause audio when exiting VR mode
+            if (isAudioInitialized && youtubeAudio && youtubeAudio.isPlaying) {
+                youtubeAudio.pause();
+                if (audioElement) {
+                    audioElement.pause();
+                }
+                console.log('Áudio pausado ao encerrar sessão VR');
+            }
+        } catch (error) {
+            console.error('Erro ao encerrar sessão WebXR:', error);
+        }
+    });
+
     const controllerGrip1 = renderer.xr.getControllerGrip(0);
     controllerGrip1.add(controllerModelFactory.createControllerModel(controllerGrip1));
     scene.add(controllerGrip1);
@@ -163,7 +467,6 @@ function init() {
     controllerGrip2.add(controllerModelFactory.createControllerModel(controllerGrip2));
     scene.add(controllerGrip2);
 
-    // Mãos (opcional)
     const hand1 = renderer.xr.getHand(0);
     hand1.add(handModelFactory.createHandModel(hand1));
     scene.add(hand1);
@@ -172,7 +475,6 @@ function init() {
     hand2.add(handModelFactory.createHandModel(hand2));
     scene.add(hand2);
 
-    // Plano preto para transição com fade
     const fadeGeometry = new THREE.PlaneGeometry(2, 2);
     const fadeMaterial = new THREE.MeshBasicMaterial({
         color: 0x000000,
@@ -186,7 +488,6 @@ function init() {
     fadePlane.frustumCulled = false;
     scene.add(fadePlane);
 
-    // Sprite de descrição
     const canvas = document.createElement('canvas');
     canvas.width = 512;
     canvas.height = 128;
@@ -196,386 +497,644 @@ function init() {
     context.textAlign = 'center';
     context.fillText('', canvas.width / 2, canvas.height / 2);
     const texture = new THREE.CanvasTexture(canvas);
-    const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
-    descricaoSprite = new THREE.Sprite(material);
-    descricaoSprite.scale.set(10, 2.5, 1);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide });
+    const geometry = new THREE.PlaneGeometry(10, 2.5);
+    descricaoSprite = new THREE.Mesh(geometry, material);
     descricaoSprite.visible = false;
-    scene.add(descricaoSprite);
+    sceneGroup.add(descricaoSprite);
 
-    // Eventos
     window.addEventListener('resize', onWindowResize);
     window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointerdown', onFirstInteraction, { once: true });
     window.addEventListener('mousemove', (event) => {
         mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
         mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     });
 }
 
-// Atualiza o texto do sprite com quebra de linhas e fundo arredondado
-function atualizarDescricaoTexto(texto) {
-    const canvas = descricaoSprite.material.map.image;
-    const ctx = canvas.getContext('2d');
-
-    const width = 512;
-    const height = 128;
-    canvas.width = width;
-    canvas.height = height;
-
-    ctx.clearRect(0, 0, width, height);
-
-    const fontSize = 32;
-    const paddingX = 20;
-    const paddingY = 15;
-    const radius = 18;
-
-    ctx.font = `${fontSize}px Arial, sans-serif`;
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'center';
-
-    // Dividir texto em linhas
-    const maxWidth = width * 0.9;
-    const words = texto.split(' ');
-    const lines = [];
-    let currentLine = '';
-
-    for (let i = 0; i < words.length; i++) {
-        const testLine = currentLine + words[i] + ' ';
-        if (ctx.measureText(testLine).width > maxWidth && currentLine !== '') {
-            lines.push(currentLine.trim());
-            currentLine = words[i] + ' ';
-        } else {
-            currentLine = testLine;
-        }
-    }
-    lines.push(currentLine.trim());
-
-    // Medidas da caixa
-    let maxLineWidth = 0;
-    lines.forEach(line => {
-        const lineWidth = ctx.measureText(line).width;
-        if (lineWidth > maxLineWidth) maxLineWidth = lineWidth;
-    });
-
-    const lineHeight = fontSize * 1.3;
-    const textHeight = lines.length * lineHeight;
-    const boxWidth = maxLineWidth + paddingX * 2;
-    const boxHeight = textHeight + paddingY * 2;
-    const boxX = (width - boxWidth) / 2;
-    const boxY = (height - boxHeight) / 2;
-
-    // Fundo com gradiente e borda suave
-    const gradient = ctx.createLinearGradient(0, boxY, 0, boxY + boxHeight);
-    gradient.addColorStop(0, 'rgba(30,30,30,0.9)');
-    gradient.addColorStop(1, 'rgba(10,10,10,0.9)');
-
-    ctx.fillStyle = gradient;
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-    ctx.lineWidth = 2;
-
-    ctx.beginPath();
-    ctx.moveTo(boxX + radius, boxY);
-    ctx.lineTo(boxX + boxWidth - radius, boxY);
-    ctx.quadraticCurveTo(boxX + boxWidth, boxY, boxX + boxWidth, boxY + radius);
-    ctx.lineTo(boxX + boxWidth, boxY + boxHeight - radius);
-    ctx.quadraticCurveTo(boxX + boxWidth, boxY + boxHeight, boxX + boxWidth - radius, boxY + boxHeight);
-    ctx.lineTo(boxX + radius, boxY + boxHeight);
-    ctx.quadraticCurveTo(boxX, boxY + boxHeight, boxX, boxY + boxHeight - radius);
-    ctx.lineTo(boxX, boxY + radius);
-    ctx.quadraticCurveTo(boxX, boxY, boxX + radius, boxY);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    // Desenhar texto com sombra
-    ctx.fillStyle = 'white';
-    ctx.shadowColor = 'black';
-    ctx.shadowBlur = 6;
-    ctx.shadowOffsetX = 2;
-    ctx.shadowOffsetY = 2;
-
-    for (let i = 0; i < lines.length; i++) {
-        ctx.fillText(lines[i], width / 2, boxY + paddingY + i * lineHeight);
-    }
-
-    ctx.shadowColor = 'transparent'; // remove sombra para próximas renderizações
-    descricaoSprite.material.map.needsUpdate = true;
-}
-
-// Controla efeito de fade in/out para transição entre cenas
-function startFade(direction, callback) {
-    fadeDirection = direction;
-    fadeCallback = callback;
-    fading = true;
-}
-
-// Carrega uma cena com base no nome
-function loadScene(sceneName, cenaOrigemId) {
-    const data = scenesData[sceneName];
-    if (!data) {
-        console.warn(`Cena "${sceneName}" não encontrada.`);
-        return;
-    }
-    cenaAtualId = data.id
-
-    console.log('Carregando cena:', sceneName);
-    console.log('entrada_rotacao_y recebida:', data.entrada_rotacao_y);
-
-    savedCameraQuaternion.copy(camera.quaternion);
-    salvarHistoricoCena(data.id);
-
-    // Remove panorama atual
-    if (currentPanoramaMesh) {
-        scene.remove(currentPanoramaMesh);
-        disposeMesh(currentPanoramaMesh);
-        currentPanoramaMesh = null;
-    }
-
-    // Remove hotspots antigos
-    hotspotMeshes.forEach(mesh => disposeMesh(mesh));
-    hotspotMeshes = [];
-
-    // Cria geometria da esfera panorâmica invertida
-    const geometry = new THREE.SphereGeometry(50, 128, 128);
-    geometry.scale(-1, 1, 1);
-
-    const texture = textureCache[`panorama${data.id}`];
-    if (!texture) {
-        console.warn(`Textura não encontrada para a cena: ${sceneName}`);
-        return;
-    }
-
-    const material = new THREE.MeshBasicMaterial({ map: texture });
-    currentPanoramaMesh = new THREE.Mesh(geometry, material);
-    currentPanoramaMesh.userData.ignoreRaycast = true;
-    scene.add(currentPanoramaMesh);
-
-    // Ajusta posição vertical da esfera conforme VR ou desktop
-    //currentPanoramaMesh.position.y = renderer.xr.isPresenting ? -1.6 : 0;
-
-    // Cria hotspots
-    const radius = 20;
-    data.hotspots.forEach((hotspot, index) => {
-        let mat;
-        if (hotspot.icon && textureCache[hotspot.icon]) {
-            mat = new THREE.SpriteMaterial({ map: textureCache[hotspot.icon], transparent: true, alphaTest: 0.01 });
-        } else {
-            mat = new THREE.SpriteMaterial({ color: 0xffff00 });
-        }
-
-        const sprite = new THREE.Sprite(mat);
-
-        sprite.userData = {
-            target: hotspot.target,
-            descricao: hotspot.name,
-            entrada_rotacao_y: hotspot.entrada_rotacao_y
-        };
-
-        // Posiciona hotspot
-        if (
-            typeof hotspot.pos_x === 'number' &&
-            typeof hotspot.pos_y === 'number' &&
-            typeof hotspot.pos_z === 'number'
-        ) {
-            sprite.position.set(hotspot.pos_x, hotspot.pos_y, hotspot.pos_z);
-
-            // Ajusta altura do hotspot em VR
-            if (renderer.xr.isPresenting) {
-                sprite.position.y -= 1.6;
+function onFirstInteraction(event) {
+    try {
+        if (!isAudioStarted && isAudioInitialized && youtubeAudio) {
+            youtubeAudio.play();
+            if (audioElement) {
+                audioElement.play();
             }
-        } else {
-            // Posiciona em círculo caso não haja posição explícita
-            const angle = (index / data.hotspots.length) * Math.PI * 2;
-            const x = Math.cos(angle) * radius;
-            const y = 5;
-            const z = Math.sin(angle) * radius;
-            sprite.position.set(x, y, z);
+            isAudioStarted = true;
+            console.log('Áudio do YouTube iniciado após primeira interação do usuário');
+        }
+    } catch (error) {
+        console.error('Erro ao iniciar áudio na primeira interação:', error);
+    }
+}
+
+// Remaining functions (unchanged from original)
+function registrarCenasRecursivamente(cena) {
+    try {
+        if (!cena || scenesData[`panorama${cena.id}`]) return;
+        scenesData[`panorama${cena.id}`] = cena;
+        for (const hotspot of cena.hotspots || []) {
+            if (hotspot.cena_destino && !scenesData[`panorama${hotspot.cena_destino.id}`]) {
+                carregarTodasAsCenas(hotspot.cena_destino.id).then(destino => {
+                    if (destino) registrarCenasRecursivamente(destino);
+                }).catch(error => {
+                    console.error(`Erro ao carregar cena destino ${hotspot.cena_destino.id}:`, error);
+                });
+            }
+        }
+    } catch (error) {
+        console.error('Erro ao registrar cenas recursivamente:', error);
+    }
+}
+
+async function preloadTextures(cena) {
+    try {
+        if (!cena) return;
+
+        const promises = [];
+
+        if (!textureCache[`panorama${cena.id}`]) {
+            promises.push(
+                textureLoader.loadAsync(cena.image).then(tex => {
+                    tex.colorSpace = THREE.SRGBColorSpace;
+                    tex.minFilter = THREE.LinearFilter;
+                    tex.magFilter = THREE.LinearFilter;
+                    tex.generateMipmaps = false;
+                    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+                    textureCache[`panorama${cena.id}`] = tex;
+                }).catch(error => {
+                    console.error(`Erro ao carregar textura para cena ${cena.id}:`, error);
+                    throw error;
+                })
+            );
         }
 
-        sprite.scale.set(2.5, 2.5, 1);
-        hotspotMeshes.push(sprite);
-        scene.add(sprite);
-    });
+        for (const hotspot of cena.hotspots || []) {
+            if (hotspot.icon && !textureCache[hotspot.icon]) {
+                promises.push(
+                    textureLoader.loadAsync(hotspot.icon).then(tex => {
+                        tex.colorSpace = THREE.SRGBColorSpace;
+                        textureCache[hotspot.icon] = tex;
+                    }).catch(error => {
+                        console.error(`Erro ao carregar textura do hotspot ${hotspot.name}:`, error);
+                        throw error;
+                    })
+                );
+            }
+        }
 
-    console.log('Cena carregada:', sceneName);
+        await Promise.all(promises);
+    } catch (error) {
+        console.error(`Erro em preloadTextures para cena ${cena?.id}:`, error);
+        throw error;
+    }
+}
 
-    // Aplica rotação inicial da câmera para orientar panorama
-    if (!renderer.xr.isPresenting) {
-        let rotacaoY = 0;
+async function preloadRemainingTextures(initialCena) {
+    try {
+        const allScenes = Object.values(scenesData);
+        const loadedIds = new Set([initialCena.id]);
 
-        if (cenaOrigemId) {
-            const hotspotEntrada = data.hotspots.find(hotspot => {
-                const destinoId = hotspot.cena_destino?.id;
-                return destinoId === cenaOrigemId;
-            });
+        const adjacent = initialCena.hotspots
+            .map(hotspot => hotspot.cena_destino)
+            .filter(dest => dest && !loadedIds.has(dest.id));
 
-            if (hotspotEntrada) {
-                rotacaoY = calcularRotacaoYDoHotspot(hotspotEntrada.pos_x, hotspotEntrada.pos_y, hotspotEntrada.pos_z);
-                console.log(`Rotação Y calculada a partir do hotspot de entrada: ${rotacaoY.toFixed(3)} rad`);
+        await Promise.all(adjacent.map(dest => {
+            loadedIds.add(dest.id);
+            return preloadTextures(dest).catch(err => console.error(`Failed to preload ${dest.id}:`, err));
+        }));
+
+        const remaining = allScenes.filter(cena => !loadedIds.has(cena.id));
+        for (let i = 0; i < remaining.length; i += 4) {
+            await Promise.all(
+                remaining.slice(i, i + 4).map(cena =>
+                    preloadTextures(cena).catch(err => console.error(`Failed to preload ${cena.id}:`, err))
+                )
+            );
+        }
+    } catch (error) {
+        console.error('Erro em preloadRemainingTextures:', error);
+    }
+}
+
+function salvarHistoricoCena(cenaId) {
+    try {
+        let historico = JSON.parse(localStorage.getItem('historicoCenas') || '[]');
+        if (!historico.includes(cenaId)) {
+            historico.push(cenaId);
+            localStorage.setItem('historicoCenas', JSON.stringify(historico));
+        }
+    } catch (error) {
+        console.error('Erro ao salvar histórico de cena:', error);
+    }
+}
+
+async function loadScene(sceneName, cenaOrigemId) {
+    try {
+        let data = scenesData[sceneName];
+        if (!data) {
+            console.log(`Cena "${sceneName}" não encontrada no cache. Carregando agora...`);
+            const id = parseInt(sceneName.replace('panorama', ''));
+            data = await carregarTodasAsCenas(id);
+            if (data) {
+                registrarCenasRecursivamente(data);
             } else {
-                rotacaoY = (typeof data.entrada_rotacao_y === 'number') ? data.entrada_rotacao_y : Math.PI / 2;
-                console.warn(`Hotspot de entrada para cena ${cenaOrigemId} não encontrado. Usando entrada_rotacao_y ou padrão.`);
+                console.error(`Falha ao carregar cena ${sceneName} do Supabase.`);
+                return;
+            }
+        }
+        cenaAtualId = data.id;
+
+        console.log('Carregando cena:', sceneName);
+        console.log('Dados de rotação da cena:', {
+            yaw: data.entrada_rotacao_y,
+            pitch: data.entrada_rotacao_pitch,
+            roll: data.entrada_rotacao_roll
+        });
+
+        savedCameraQuaternion.copy(camera.quaternion);
+        salvarHistoricoCena(data.id);
+
+        if (currentPanoramaMesh) {
+            sceneGroup.remove(currentPanoramaMesh);
+            disposeMesh(currentPanoramaMesh);
+            currentPanoramaMesh = null;
+        }
+
+        hotspotMeshes.forEach(mesh => {
+            sceneGroup.remove(mesh);
+            disposeMesh(mesh);
+        });
+        hotspotMeshes = [];
+
+        let texture = textureCache[`panorama${data.id}`];
+        if (!texture) {
+            console.warn(`Textura não encontrada para ${sceneName}, carregando agora...`);
+            startFade(1, async () => {
+                try {
+                    await preloadTextures(data);
+                    texture = textureCache[`panorama${data.id}`];
+                    proceedWithSceneLoading(data, texture, cenaOrigemId);
+                    startFade(-1);
+                } catch (error) {
+                    console.error(`Erro ao carregar textura para cena ${sceneName}:`, error);
+                    startFade(-1);
+                }
+            });
+            return;
+        }
+
+        proceedWithSceneLoading(data, texture, cenaOrigemId);
+    } catch (error) {
+        console.error(`Erro em loadScene(${sceneName}):`, error);
+    }
+}
+
+function proceedWithSceneLoading(data, texture, cenaOrigemId) {
+    try {
+        const geometry = new THREE.SphereGeometry(50, 128, 128);
+        geometry.scale(-1, 1, 1);
+        const material = new THREE.MeshBasicMaterial({ map: texture });
+        currentPanoramaMesh = new THREE.Mesh(geometry, material);
+        currentPanoramaMesh.userData.ignoreRaycast = true;
+        sceneGroup.add(currentPanoramaMesh);
+
+        const desiredEyeHeight = 1.6;
+        const heightDiff = desiredEyeHeight - (data.captureHeight || desiredEyeHeight);
+        sceneGroup.position.y = -heightDiff;
+        console.log(`Ajuste de altura aplicado: heightDiff=${heightDiff.toFixed(2)}m`);
+
+        currentPanoramaMesh.position.y = 0;
+
+        data.hotspots.forEach((hotspot, index) => {
+            let mat;
+            if (hotspot.icon && textureCache[hotspot.icon]) {
+                mat = new THREE.MeshBasicMaterial({
+                    map: textureCache[hotspot.icon],
+                    transparent: true,
+                    alphaTest: 0.01,
+                    side: THREE.DoubleSide
+                });
+            } else {
+                mat = new THREE.MeshBasicMaterial({ color: 0xffff00, side: THREE.DoubleSide });
+            }
+
+            const geometry = new THREE.PlaneGeometry(1.5, 1.5);
+            const mesh = new THREE.Mesh(geometry, mat);
+
+            const hotspotHash = hashString(hotspot.name);
+            mesh.userData = {
+                target: hotspot.target,
+                descricao: hotspot.name,
+                entrada_rotacao_y: hotspot.entrada_rotacao_y,
+                entrada_rotacao_pitch: hotspot.entrada_rotacao_pitch,
+                entrada_rotacao_roll: hotspot.entrada_rotacao_roll,
+                gradientColor1: getRgbaFromHash(hotspotHash, 0.7, 0.3, 0.9),
+                gradientColor2: getRgbaFromHash(hotspotHash, 0.7, 0.2, 0.9)
+            };
+
+            if (
+                typeof hotspot.pos_x === 'number' &&
+                typeof hotspot.pos_y === 'number' &&
+                typeof hotspot.pos_z === 'number'
+            ) {
+                mesh.position.set(hotspot.pos_x, hotspot.pos_y, hotspot.pos_z);
+                console.log(`Hotspot ${hotspot.name}: pos_x=${hotspot.pos_x.toFixed(3)}, pos_y=${hotspot.pos_y.toFixed(3)}, pos_z=${hotspot.pos_z.toFixed(3)}`);
+            } else {
+                const angle = (index / data.hotspots.length) * Math.PI * 2;
+                const x = Math.cos(angle) * 50;
+                const y = 0;
+                const z = Math.sin(angle) * 50;
+                mesh.position.set(x, y, z);
+                console.warn(`Hotspot ${hotspot.name} sem posição válida, usando padrão: x=${x.toFixed(3)}, y=${y.toFixed(3)}, z=${z.toFixed(3)}`);
+            }
+
+            mesh.lookAt(0, 0, 0);
+
+            hotspotMeshes.push(mesh);
+            sceneGroup.add(mesh);
+        });
+
+        if (!deviceOrientationCamera.enabled) {
+            let yaw = data.entrada_rotacao_y || 0;
+            let pitch = data.entrada_rotacao_pitch || 0;
+            let roll = data.entrada_rotacao_roll || 0;
+
+            if (cenaOrigemId) {
+                const hotspotEntrada = data.hotspots.find(hotspot => {
+                    const destinoId = hotspot.cena_destino?.id;
+                    console.log(`Verificando hotspot: destinoId=${destinoId}, cenaOrigemId=${cenaOrigemId}`);
+                    return destinoId === Number(cenaOrigemId);
+                });
+
+                if (hotspotEntrada) {
+                    yaw = calcularRotacaoYDoHotspot(hotspotEntrada.pos_x, hotspotEntrada.pos_y, hotspotEntrada.pos_z);
+                    pitch = hotspotEntrada.entrada_rotacao_pitch || 0;
+                    roll = hotspotEntrada.entrada_rotacao_roll || 0;
+                    yaw = (yaw % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+                    console.log(`Rotação do hotspot de entrada: yaw=${yaw.toFixed(3)}, pitch=${pitch.toFixed(3)}, roll=${roll.toFixed(3)} rad`);
+                } else {
+                    console.warn(`Hotspot de entrada para cena ${cenaOrigemId} não encontrado. Usando rotação da cena.`);
+                }
+            }
+
+            aplicarRotacaoCamera(yaw, pitch, roll);
+        } else {
+            deviceOrientationCamera.resetOrientation();
+        }
+
+        console.log('Cena carregada:', `panorama${data.id}`);
+        preloadRemainingTextures(data);
+    } catch (error) {
+        console.error('Erro ao processar cena:', error);
+    }
+}
+
+function startFade(direction, callback) {
+    try {
+        fadeDirection = direction;
+        fadeCallback = callback;
+        fading = true;
+    } catch (error) {
+        console.error('Erro em startFade:', error);
+    }
+}
+
+function onSelectStart(event) {
+    try {
+        console.log('onSelectStart chamado:', event.target, event);
+        const controller = event.target;
+        tempMatrix.identity().extractRotation(controller.matrixWorld);
+        raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+        raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+        const intersects = raycaster.intersectObjects(hotspotMeshes, false);
+        console.log('Interseções VR:', intersects);
+        if (intersects.length > 0) {
+            const target = intersects[0].object.userData.target;
+            console.log('Hotspot selecionado:', target);
+            if (target) {
+                startFade(1, () => {
+                    loadScene(target, cenaAtualId);
+                    startFade(-1);
+                });
             }
         } else {
-            rotacaoY = (typeof data.entrada_rotacao_y === 'number') ? data.entrada_rotacao_y : Math.PI / 2;
+            console.log('Nenhum hotspot intersectado pelo controlador');
         }
-
-        aplicarRotacaoCamera(rotacaoY);
+    } catch (error) {
+        console.error('Erro em onSelectStart:', error);
     }
 }
 
-// Evento de clique nos controles VR
-function onSelectStart(event) {
-    const controller = event.target;
-    tempMatrix.identity().extractRotation(controller.matrixWorld);
-    raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
-    raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
-    const intersects = raycaster.intersectObjects(hotspotMeshes, false);
-    if (intersects.length > 0) {
-        const target = intersects[0].object.userData.target;
-        if (target) {
-            startFade(1, () => {
-                loadScene(target,cenaAtualId);
-                startFade(-1);
-            });
-        }
-    }
-}
-
-// Clique no mouse (modo desktop)
 function onPointerDown(event) {
-    if (renderer.xr.isPresenting) return;
+    try {
+        if (renderer.xr.isPresenting) return;
 
-    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-    raycaster.setFromCamera(mouse, camera);
-    const intersects = raycaster.intersectObjects(hotspotMeshes, false);
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(hotspotMeshes, false);
 
-    if (intersects.length > 0) {
-        const target = intersects[0].object.userData.target;
-        if (target) {
-            startFade(1, () => {
-                loadScene(target);
-                startFade(-1);
-            });
+        if (intersects.length > 0) {
+            const target = intersects[0].object.userData.target;
+            if (target) {
+                startFade(1, () => {
+                    loadScene(target, cenaAtualId);
+                    startFade(-1);
+                });
+            }
         }
+    } catch (error) {
+        console.error('Erro em onPointerDown:', error);
     }
 }
 
-// Ajusta tamanho do canvas e câmera ao redimensionar
 function onWindowResize() {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    try {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    } catch (error) {
+        console.error('Erro em onWindowResize:', error);
+    }
 }
 
-// Calcula o ângulo Y entre o hotspot e a origem
 function calcularRotacaoYDoHotspot(pos_x, pos_y, pos_z) {
-    //Faz com que ao entrar numa cena clicando num hotspot,
-    // a câmera esteja olhando na direção do hotspot de onde o usuário veio
-    const dir = new THREE.Vector3(pos_x, pos_y, pos_z).normalize();
-    return Math.atan2(dir.x, dir.z);
+    try {
+        const dir = new THREE.Vector3(pos_x, pos_y, pos_z).normalize();
+        return Math.atan2(dir.x, dir.z);
+    } catch (error) {
+        console.error('Erro em calcularRotacaoYDoHotspot:', error);
+        return 0;
+    }
 }
 
-// Aplica rotação à câmera via quaternion
-function aplicarRotacaoCamera(rotacaoY) {
-    const quat = new THREE.Quaternion();
-    quat.setFromEuler(new THREE.Euler(0, rotacaoY, 0));
-    camera.quaternion.copy(quat);
+function aplicarRotacaoCamera(yaw, pitch = 0, roll = 0) {
+    try {
+        let effectiveRoll = roll;
 
-    console.log(`>> Câmera rotacionada para Y: ${rotacaoY.toFixed(3)} rad`);
+        if (renderer.xr.isPresenting) {
+            effectiveRoll = 0;
+        }
+
+        const euler = new THREE.Euler(pitch, yaw, effectiveRoll, 'YXZ');
+        const quaternion = new THREE.Quaternion().setFromEuler(euler).normalize();
+        savedCameraQuaternion.copy(quaternion);
+
+        if (renderer.xr.isPresenting) {
+            const qHeadset = camera.quaternion.clone();
+            const qDesiredInv = quaternion.clone().invert();
+            sceneGroup.quaternion.copy(qHeadset.multiply(qDesiredInv));
+        } else {
+            camera.quaternion.copy(quaternion);
+            if (controls.enabled) {
+                controls.target.set(0, 0, -0.001)
+                    .applyQuaternion(quaternion)
+                    .add(camera.position);
+                controls.update();
+            }
+        }
+
+        console.log(
+            `>> Rotação aplicada: yaw=${yaw.toFixed(3)}, pitch=${pitch.toFixed(3)}, roll=${effectiveRoll.toFixed(3)}`
+        );
+    } catch (error) {
+        console.error('Erro em aplicarRotacaoCamera:', error);
+    }
 }
-// Loop de animação com suporte a XR
+
+function updateLaser(controller) {
+    try {
+        const laser = controller.getObjectByName('laser');
+        if (!laser) {
+            console.warn('Laser não encontrado para controlador:', controller);
+            return;
+        }
+
+        tempMatrix.identity().extractRotation(controller.matrixWorld);
+        raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+        raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+        const intersects = raycaster.intersectObjects(hotspotMeshes, false);
+        laser.visible = true;
+        if (intersects.length > 0) {
+            laser.scale.z = intersects[0].distance;
+            console.log('Laser intersectou hotspot:', intersects[0].object.userData);
+        } else {
+            laser.scale.z = 10;
+        }
+    } catch (error) {
+        console.error('Erro em updateLaser:', error);
+    }
+}
+
+function atualizarDescricaoTexto(texto, intersected) {
+    try {
+        const canvas = descricaoSprite.material.map.image;
+        const ctx = canvas.getContext('2d');
+
+        const width = 512;
+        const height = 128;
+        canvas.width = width;
+        canvas.height = height;
+
+        ctx.clearRect(0, 0, width, height);
+
+        const fontSize = 32;
+        const paddingX = 20;
+        const paddingY = 15;
+        const radius = 18;
+
+        ctx.font = `${fontSize}px Arial, sans-serif`;
+        ctx.textBaseline = 'top';
+        ctx.textAlign = 'center';
+
+        const maxWidth = width * 0.9;
+        const words = texto.split(' ');
+        const lines = [];
+        let currentLine = '';
+
+        for (let i = 0; i < words.length; i++) {
+            const testLine = currentLine + words[i] + ' ';
+            if (ctx.measureText(testLine).width > maxWidth && currentLine !== '') {
+                lines.push(currentLine.trim());
+                currentLine = words[i] + ' ';
+            } else {
+                currentLine = testLine;
+            }
+        }
+        lines.push(currentLine.trim());
+
+        let maxLineWidth = 0;
+        lines.forEach(line => {
+            const lineWidth = ctx.measureText(line).width;
+            if (lineWidth > maxLineWidth) maxLineWidth = lineWidth;
+        });
+
+        const lineHeight = fontSize * 1.3;
+        const textHeight = lines.length * lineHeight;
+        const boxWidth = maxLineWidth + paddingX * 2;
+        const boxHeight = textHeight + paddingY * 2;
+        const boxX = (width - boxWidth) / 2;
+        const boxY = (height - boxHeight) / 2;
+
+        const gradient = ctx.createLinearGradient(0, boxY, 0, boxY + boxHeight);
+        gradient.addColorStop(0, intersected.userData.gradientColor1 || 'rgba(30,30,30,0.9)');
+        gradient.addColorStop(1, intersected.userData.gradientColor2 || 'rgba(10,10,10,0.9)');
+
+        ctx.fillStyle = gradient;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.lineWidth = 2;
+
+        ctx.beginPath();
+        ctx.moveTo(boxX + radius, boxY);
+        ctx.lineTo(boxX + boxWidth - radius, boxY);
+        ctx.quadraticCurveTo(boxX + boxWidth, boxY, boxX + boxWidth, boxY + radius);
+        ctx.lineTo(boxX + boxWidth, boxY + boxHeight - radius);
+        ctx.quadraticCurveTo(boxX + boxWidth, boxY + boxHeight, boxX + boxWidth - radius, boxY + boxHeight);
+        ctx.lineTo(boxX + radius, boxY + boxHeight);
+        ctx.quadraticCurveTo(boxX, boxY + boxHeight, boxX, boxY + boxHeight - radius);
+        ctx.lineTo(boxX, boxY + radius);
+        ctx.quadraticCurveTo(boxX, boxY, boxX + radius, boxY);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = 'white';
+        ctx.shadowColor = 'black';
+        ctx.shadowBlur = 6;
+        ctx.shadowOffsetX = 2;
+        ctx.shadowOffsetY = 2;
+
+        for (let i = 0; i < lines.length; i++) {
+            ctx.fillText(lines[i], width / 2, boxY + paddingY + i * lineHeight);
+        }
+
+        ctx.shadowColor = 'transparent';
+        descricaoSprite.material.map.needsUpdate = true;
+    } catch (error) {
+        console.error('Erro em atualizarDescricaoTexto:', error);
+    }
+}
+
 function animate() {
     renderer.setAnimationLoop(render);
 }
 
-// Renderiza quadro a quadro
-function render() {
-    const delta = clock.getDelta();
+function render(time, frame) {
+    try {
+        const delta = clock.getDelta();
 
-    // Atualiza fade in/out
-    if (fading) {
-        fadeOpacity += fadeDirection * delta * 2;
-        fadeOpacity = THREE.MathUtils.clamp(fadeOpacity, 0, 1);
-        fadePlane.material.opacity = fadeOpacity;
-
-        if ((fadeDirection === 1 && fadeOpacity >= 1) || (fadeDirection === -1 && fadeOpacity <= 0)) {
-            fading = false;
-            if (fadeCallback) {
-                const cb = fadeCallback;
-                fadeCallback = null;
-                cb();
+        if (renderer.xr.isPresenting && frame && needsHeightAdjustment) {
+            needsHeightAdjustment = false;
+            const referenceSpace = renderer.xr.getReferenceSpace();
+            const viewerPose = frame.getViewerPose(referenceSpace);
+            if (viewerPose) {
+                const h = viewerPose.transform.position.y;
+                console.log(`Altura reportada pelo headset: ${h.toFixed(2)}m. Ajustando para 1.6m...`);
+                const deltaY = h - 1.6;
+                const offsetTransform = new XRRigidTransform({ x: 0, y: deltaY, z: 0 });
+                const newReferenceSpace = referenceSpace.getOffsetReferenceSpace(offsetTransform);
+                renderer.xr.setReferenceSpace(newReferenceSpace);
+                baseReferenceSpace = newReferenceSpace;
+                console.log(`Ajuste aplicado: offset y=${deltaY.toFixed(2)}. Nova altura efetiva: 1.6m`);
+            } else {
+                console.warn('Não foi possível obter viewerPose na primeira frame.');
             }
         }
-    }
 
-    // Mantém plano de fade sempre à frente da câmera
-    fadePlane.position.copy(camera.position);
-    fadePlane.quaternion.copy(camera.quaternion);
-    fadePlane.translateZ(-0.5);
+        if (!renderer.xr.isPresenting && deviceOrientationCamera.enabled) {
+            deviceOrientationCamera.update();
+            console.log('DeviceOrientationCamera updating');
+        } else if (!renderer.xr.isPresenting && controls.enabled) {
+            controls.update();
+        }
 
-    if (!renderer.xr.isPresenting && controls) controls.update();
+        if (fading) {
+            fadeOpacity += fadeDirection * delta * 0.6;
+            fadeOpacity = THREE.MathUtils.clamp(fadeOpacity, 0, 1);
+            fadePlane.material.opacity = fadeOpacity;
 
-    // Variável para armazenar o hotspot que está sendo apontado atualmente (pelo laser ou mouse)
-    let intersected = null;
+            if ((fadeDirection === 1 && fadeOpacity >= 1) || (fadeDirection === -1 && fadeOpacity <= 0)) {
+                fading = false;
+                if (fadeCallback) {
+                    const cb = fadeCallback;
+                    fadeCallback = null;
+                    cb();
+                }
+            }
+        }
 
-// Verifica se está em modo VR (óculos)
-    if (renderer.xr.isPresenting) {
-        // Para cada um dos dois controladores VR (esquerdo e direito)
-        [controller1, controller2].forEach(controller => {
-            // Prepara uma matriz temporária para extrair a rotação do controle
-            tempMatrix.identity().extractRotation(controller.matrixWorld);
+        fadePlane.position.copy(camera.position);
+        fadePlane.quaternion.copy(camera.quaternion);
+        fadePlane.translateZ(-0.5);
 
-            // Define a origem do raio (raycaster) como a posição do controle no mundo
-            raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+        let intersected = null;
 
-            // Define a direção do raio como "para frente" do controle, considerando sua rotação
-            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+        if (renderer.xr.isPresenting) {
+            const session = renderer.xr.getSession();
+            if (session) {
+                session.inputSources.forEach((inputSource, index) => {
+                    if (inputSource.gamepad && inputSource.gamepad.buttons[0]?.pressed) {
+                        console.log(`Gatilho pressionado no controlador ${index}`);
+                        onSelectStart({ target: index === 0 ? controller1 : controller2 });
+                    }
+                });
+            }
 
-            // Detecta interseções entre o raio e os hotspots
+            [controller1, controller2].forEach((controller, index) => {
+                updateLaser(controller);
+                tempMatrix.identity().extractRotation(controller.matrixWorld);
+                raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+                raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+                const intersects = raycaster.intersectObjects(hotspotMeshes, false);
+                console.log(`Raycaster VR - Interseções controlador ${index + 1}:`, intersects);
+                if (intersects.length > 0 && !intersected) {
+                    intersected = intersects[0].object;
+                }
+            });
+        } else {
+            raycaster.setFromCamera(mouse, camera);
             const intersects = raycaster.intersectObjects(hotspotMeshes, false);
-
-            // Se houver interseção e ainda não foi definido um `intersected`, usa esse objeto
-            if (intersects.length > 0 && !intersected) {
-                intersected = intersects[0].object; // O hotspot que está sendo apontado pelo controle
+            if (intersects.length > 0) {
+                intersected = intersects[0].object;
             }
-        });
-    } else {
-        // Modo não-VR (desktop): calcula a direção do raio com base na posição do mouse na tela
-        raycaster.setFromCamera(mouse, camera);
-
-        // Verifica se o raio colide com algum hotspot na cena
-        const intersects = raycaster.intersectObjects(hotspotMeshes, false);
-
-        // Se houver interseção, armazena o primeiro objeto encontrado como `intersected`
-        if (intersects.length > 0) {
-            intersected = intersects[0].object; // O hotspot que está sob o ponteiro do mouse
         }
+
+        hotspotMeshes.forEach(mesh => {
+            mesh.lookAt(camera.position);
+        });
+
+        if (intersected) {
+            atualizarDescricaoTexto(intersected.userData.descricao || '', intersected);
+            descricaoSprite.position.copy(intersected.position);
+            descricaoSprite.position.y += 3;
+            descricaoSprite.lookAt(camera.position);
+            descricaoSprite.visible = true;
+        } else {
+            descricaoSprite.visible = false;
+        }
+
+        // Update audio listener position to follow camera
+        if (audioListener) {
+            audioListener.position.copy(camera.position);
+            audioListener.quaternion.copy(camera.quaternion);
+        }
+
+        renderer.render(scene, camera);
+    } catch (error) {
+        console.error('Erro em render:', error);
     }
-
-
-
-
-    // Atualiza descrição do hotspot se houver
-    if (intersected) {
-        atualizarDescricaoTexto(intersected.userData.descricao || '');
-        descricaoSprite.position.copy(intersected.position);
-        descricaoSprite.position.y += 3;
-        descricaoSprite.lookAt(camera.position);
-        descricaoSprite.visible = true;
-    } else {
-        descricaoSprite.visible = false;
-    }
-
-    renderer.render(scene, camera);
 }
 
-// Remove geometria e materiais de malha para liberar memória
 function disposeMesh(mesh) {
-    if (mesh.geometry) mesh.geometry.dispose();
-    if (mesh.material) {
-        if (mesh.material.map) mesh.material.map.dispose();
-        mesh.material.dispose();
+    try {
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (mesh.material) {
+            if (mesh.material.map) mesh.material.map.dispose();
+            mesh.material.dispose();
+        }
+    } catch (error) {
+        console.error('Erro em disposeMesh:', error);
     }
-    scene.remove(mesh);
 }

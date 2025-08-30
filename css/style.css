@@ -69,3 +69,58 @@ img {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.6; }
 }
+#controls-container {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.control-button {
+    padding: 10px 15px;
+    background-color: #ff3333;
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    font-family: 'Arial', sans-serif;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    transition: background-color 0.2s, transform 0.1s;
+}
+
+.control-button:hover {
+    background-color: #cc0000;
+    transform: scale(1.05);
+}
+
+.control-button:active {
+    transform: scale(0.95);
+}
+
+button[ar-button] {
+    padding: 10px 15px;
+    background-color: #ff3333;
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    font-family: 'Arial', sans-serif;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    transition: background-color 0.2s, transform 0.1s;
+}
+
+button[ar-button]:hover {
+    background-color: #cc0000;
+    transform: scale(1.05);
+}
+
+button[ar-button]:active {
+    transform: scale(0.95);
+}
