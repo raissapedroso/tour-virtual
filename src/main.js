@@ -1,4 +1,3 @@
-// Import required Three.js modules
 import * as THREE from 'three';
 import { VRButton } from 'three/examples/jsm/webxr/VRButton.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -6,39 +5,6 @@ import { XRControllerModelFactory } from 'three/examples/jsm/webxr/XRControllerM
 import { XRHandModelFactory } from 'three/examples/jsm/webxr/XRHandModelFactory.js';
 import { DeviceOrientationCamera } from './controls/deviceOrientationControls.js';
 import { carregarTodasAsCenas } from './scenes/scenesFetcher.js';
-
-// Audio variables
-let audioListener, youtubeAudio, youtubePlayer, fallbackAudio, audioElement;
-let isAudioStarted = false;
-let isAudioInitialized = false;
-
-// YouTube video ID for background audio
-const YOUTUBE_VIDEO_ID = 'MYPVQccHhAQ'; // Video ID from https://youtu.be/MYPVQccHhAQ
-
-// Fallback audio file path
-const FALLBACK_AUDIO_PATH = '/audio/fallback_music.mp3';
-
-// Captura erros não tratados
-window.addEventListener('unhandledrejection', (event) => {
-    console.error('Erro não tratado em promessa:', event.reason, event);
-});
-
-// Funções para geração de cores nas descrições
-function hashString(str) {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-        const char = str.charCodeAt(i);
-        hash = ((hash << 5) - hash) + char;
-        hash = hash & hash;
-    }
-    return Math.abs(hash);
-}
-
-function getRgbaFromHash(hash, saturation = 0.7, lightness = 0.3, alpha = 0.9) {
-    const hue = (hash % 360) / 360;
-    const color = new THREE.Color().setHSL(hue, saturation, lightness);
-    return `rgba(${Math.floor(color.r * 255)}, ${Math.floor(color.g * 255)}, ${Math.floor(color.b * 255)}, ${alpha})`;
-}
 
 // Variáveis principais
 let camera, scene, renderer, controls, deviceOrientationCamera;
@@ -62,12 +28,37 @@ let baseReferenceSpace = null;
 let sceneGroup;
 let needsHeightAdjustment = false;
 let originalCameraPosition = new THREE.Vector3(0, 0, 0);
+let pendingEntryQuat = null;
+let blockCameraUpdates = false;
+
+// Captura erros não tratados
+window.addEventListener('unhandledrejection', (event) => {
+    console.error('Erro não tratado em promessa:', event.reason, event);
+});
+
+// Funções para geração de cores nas descrições
+function hashString(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash;
+    }
+    return Math.abs(hash);
+}
+
+function getRgbaFromHash(hash, saturation = 0.7, lightness = 0.3, alpha = 0.9) {
+    const hue = (hash % 360) / 360;
+    const color = new THREE.Color().setHSL(hue, saturation, lightness);
+    return `rgba(${Math.floor(color.r * 255)}, ${Math.floor(color.g * 255)}, ${Math.floor(color.b * 255)}, ${alpha})`;
+}
 
 init();
 
 carregarTodasAsCenas(1).then(async data => {
     try {
         if (data) {
+            console.log(`Cena inicial carregada - ID: ${data.id}, Imagem: ${data.image}`);
             registrarCenasRecursivamente(data);
             await preloadTextures(data);
             await loadScene(`panorama${data.id}`);
@@ -109,134 +100,6 @@ function init() {
     document.body.appendChild(VRButton.createButton(renderer, {
         optionalFeatures: ['local-floor', 'local', 'hand-tracking']
     }));
-
-    // Initialize audio with YouTube IFrame Player API and fallback
-    try {
-        // Create audio listener and attach to camera for spatial audio
-        audioListener = new THREE.AudioListener();
-        camera.add(audioListener);
-
-        // Create audio object for YouTube audio
-        youtubeAudio = new THREE.Audio(audioListener);
-
-        // Create audio object for fallback audio
-        fallbackAudio = new THREE.Audio(audioListener);
-        const audioLoader = new THREE.AudioLoader();
-
-        // Dynamically load YouTube IFrame API
-        const tag = document.createElement('script');
-        tag.src = 'https://www.youtube.com/iframe_api';
-        const firstScriptTag = document.getElementsByTagName('script')[0];
-        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-
-        // Function called by YouTube API when it's loaded
-        window.onYouTubeIframeAPIReady = () => {
-            try {
-                // Validate video ID
-                if (!YOUTUBE_VIDEO_ID || typeof YOUTUBE_VIDEO_ID !== 'string' || YOUTUBE_VIDEO_ID.trim() === '') {
-                    throw new Error('ID de vídeo do YouTube inválido ou ausente');
-                }
-
-                // Create a hidden div for the YouTube player
-                const playerDiv = document.createElement('div');
-                playerDiv.id = 'youtube-player';
-                playerDiv.style.display = 'none';
-                document.body.appendChild(playerDiv);
-
-                // Create an audio element for YouTube stream
-                audioElement = document.createElement('audio');
-                audioElement.id = 'youtube-audio';
-                audioElement.crossOrigin = 'anonymous';
-                document.body.appendChild(audioElement);
-
-                // Initialize YouTube player
-                youtubePlayer = new YT.Player('youtube-player', {
-                    height: '0', // No video display needed
-                    width: '0',
-                    videoId: YOUTUBE_VIDEO_ID,
-                    playerVars: {
-                        autoplay: 0, // Autoplay disabled to comply with browser policies
-                        loop: 1, // Enable looping
-                        playlist: YOUTUBE_VIDEO_ID, // Required for looping
-                        controls: 0, // Hide controls
-                        showinfo: 0, // Deprecated but included for compatibility
-                        rel: 0, // Prevent related videos
-                        modestbranding: 1, // Minimize YouTube branding
-                        origin: window.location.origin // Explicitly set origin
-                    },
-                    events: {
-                        onReady: (event) => {
-                            // Set up audio stream from YouTube player
-                            try {
-                                const stream = event.target.getIframe();
-                                audioElement.src = `https://www.youtube.com/embed/${YOUTUBE_VIDEO_ID}?autoplay=0&loop=1&playlist=${YOUTUBE_VIDEO_ID}&controls=0&showinfo=0&rel=0&modestbranding=1&enablejsapi=1`;
-                                const context = audioListener.context;
-                                const source = context.createMediaElementSource(audioElement);
-                                source.connect(youtubeAudio.getOutput());
-                                youtubeAudio.setLoop(true);
-                                youtubeAudio.setVolume(0.5); // Default volume (0.0 to 1.0)
-                                isAudioInitialized = true;
-                                console.log('Player de áudio do YouTube inicializado com ID:', YOUTUBE_VIDEO_ID);
-                            } catch (error) {
-                                console.error('Erro ao configurar stream de áudio do YouTube:', error);
-                                loadFallbackAudio();
-                            }
-                        },
-                        onError: (error) => {
-                            console.error('Erro no player do YouTube:', error);
-                            loadFallbackAudio();
-                        }
-                    }
-                });
-            } catch (error) {
-                console.error('Erro ao inicializar player do YouTube:', error);
-                loadFallbackAudio();
-            }
-        };
-
-        // Function to load fallback audio
-        function loadFallbackAudio() {
-            try {
-                audioLoader.load(FALLBACK_AUDIO_PATH, (buffer) => {
-                    fallbackAudio.setBuffer(buffer);
-                    fallbackAudio.setLoop(true);
-                    fallbackAudio.setVolume(0.5);
-                    isAudioInitialized = true;
-                    console.log('Áudio de fallback carregado com sucesso:', FALLBACK_AUDIO_PATH);
-                    youtubeAudio = fallbackAudio;
-                }, undefined, (error) => {
-                    console.error('Erro ao carregar áudio de fallback:', error);
-                    alert('Não foi possível carregar o áudio. O tour continuará sem áudio.');
-                });
-            } catch (error) {
-                console.error('Erro ao configurar áudio de fallback:', error);
-            }
-        }
-    } catch (error) {
-        console.error('Erro ao inicializar áudio:', error);
-        loadFallbackAudio();
-    }
-
-    // Volume control UI (simple slider)
-    const volumeSlider = document.createElement('input');
-    volumeSlider.type = 'range';
-    volumeSlider.min = '0';
-    volumeSlider.max = '100';
-    volumeSlider.value = '50'; // Matches default volume of 0.5
-    volumeSlider.style.position = 'absolute';
-    volumeSlider.style.top = '10px';
-    volumeSlider.style.right = '10px';
-    volumeSlider.addEventListener('input', () => {
-        const volume = volumeSlider.value / 100;
-        if (youtubeAudio) {
-            youtubeAudio.setVolume(volume);
-            if (audioElement) {
-                audioElement.volume = volume; // Sync with audio element
-            }
-            console.log(`Volume ajustado para: ${volume}`);
-        }
-    });
-    document.body.appendChild(volumeSlider);
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -405,15 +268,7 @@ function init() {
             deviceOrientationCamera.enabled = false;
             deviceOrientationButton.style.display = 'none';
             deviceOrientationButton.textContent = 'Ativar Orientação por Dispositivo';
-
-            // Resume audio when entering VR mode
-            if (isAudioInitialized && isAudioStarted && youtubeAudio && !youtubeAudio.isPlaying) {
-                youtubeAudio.play();
-                if (audioElement) {
-                    audioElement.play();
-                }
-                console.log('Áudio retomado na sessão VR');
-            }
+            sceneGroup.quaternion.set(0, 0, 0, 1);
         } catch (error) {
             console.error('Erro ao iniciar sessão WebXR:', error);
         }
@@ -445,15 +300,7 @@ function init() {
             controllerSetupInterval = null;
             controllerSetupFrame = null;
             needsHeightAdjustment = false;
-
-            // Pause audio when exiting VR mode
-            if (isAudioInitialized && youtubeAudio && youtubeAudio.isPlaying) {
-                youtubeAudio.pause();
-                if (audioElement) {
-                    audioElement.pause();
-                }
-                console.log('Áudio pausado ao encerrar sessão VR');
-            }
+            sceneGroup.quaternion.set(0, 0, 0, 1);
         } catch (error) {
             console.error('Erro ao encerrar sessão WebXR:', error);
         }
@@ -506,32 +353,47 @@ function init() {
 
     window.addEventListener('resize', onWindowResize);
     window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('pointerdown', onFirstInteraction, { once: true });
     window.addEventListener('mousemove', (event) => {
         mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
         mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     });
 }
 
-function onFirstInteraction(event) {
+// ALTERADO: Simplifica updateUprightBillboard para alinhar diretamente ao eixo Y global
+function updateUprightBillboard(mesh, camera) {
     try {
-        if (!isAudioStarted && isAudioInitialized && youtubeAudio) {
-            youtubeAudio.play();
-            if (audioElement) {
-                audioElement.play();
-            }
-            isAudioStarted = true;
-            console.log('Áudio do YouTube iniciado após primeira interação do usuário');
-        }
+        const worldPos = new THREE.Vector3();
+        mesh.getWorldPosition(worldPos);
+
+        // Calcula a direção para a câmera no espaço mundial
+        const cameraPos = new THREE.Vector3();
+        camera.getWorldPosition(cameraPos);
+        const dirToCamera = new THREE.Vector3().subVectors(cameraPos, worldPos).normalize();
+
+        // Projeta a direção no plano XZ para obter apenas o yaw
+        const dirXZ = new THREE.Vector3(dirToCamera.x, 0, dirToCamera.z).normalize();
+
+        // Usa lookAt para alinhar o sprite à direção projetada, mantendo Y global
+        mesh.lookAt(worldPos.clone().add(dirXZ));
+
+        // Força alinhamento estrito ao eixo Y global
+        const euler = new THREE.Euler().setFromQuaternion(mesh.quaternion, 'YXZ');
+        euler.x = 0; // Remove pitch
+        euler.z = 0; // Remove roll
+        mesh.quaternion.setFromEuler(euler);
+
+        // NOVO: Log para depuração
+        console.log(`Sprite ${mesh.userData.descricao || 'unknown'} quaternion:`, mesh.quaternion.toArray());
     } catch (error) {
-        console.error('Erro ao iniciar áudio na primeira interação:', error);
+        console.error('Erro em updateUprightBillboard:', error);
     }
 }
 
-// Remaining functions (unchanged from original)
+// ALTERADO: Adiciona log para ID e imagem da cena
 function registrarCenasRecursivamente(cena) {
     try {
         if (!cena || scenesData[`panorama${cena.id}`]) return;
+        console.log(`Registrando cena - ID: ${cena.id}, Imagem: ${cena.image}`);
         scenesData[`panorama${cena.id}`] = cena;
         for (const hotspot of cena.hotspots || []) {
             if (hotspot.cena_destino && !scenesData[`panorama${hotspot.cena_destino.id}`]) {
@@ -554,6 +416,7 @@ async function preloadTextures(cena) {
         const promises = [];
 
         if (!textureCache[`panorama${cena.id}`]) {
+            console.log(`Precarregando textura - ID: ${cena.id}, Imagem: ${cena.image}`);
             promises.push(
                 textureLoader.loadAsync(cena.image).then(tex => {
                     tex.colorSpace = THREE.SRGBColorSpace;
@@ -629,7 +492,8 @@ function salvarHistoricoCena(cenaId) {
     }
 }
 
-async function loadScene(sceneName, cenaOrigemId) {
+// ALTERADO: Adiciona log para ID e imagem da cena antes de carregar
+async function loadScene(sceneName, cenaOrigemId, entryQuat = null) {
     try {
         let data = scenesData[sceneName];
         if (!data) {
@@ -637,6 +501,7 @@ async function loadScene(sceneName, cenaOrigemId) {
             const id = parseInt(sceneName.replace('panorama', ''));
             data = await carregarTodasAsCenas(id);
             if (data) {
+                console.log(`Cena carregada do Supabase - ID: ${data.id}, Imagem: ${data.image}`);
                 registrarCenasRecursivamente(data);
             } else {
                 console.error(`Falha ao carregar cena ${sceneName} do Supabase.`);
@@ -644,6 +509,8 @@ async function loadScene(sceneName, cenaOrigemId) {
             }
         }
         cenaAtualId = data.id;
+
+        console.log(`Iniciando carregamento da cena - ID: ${data.id}, Imagem: ${data.image}`);
 
         console.log('Carregando cena:', sceneName);
         console.log('Dados de rotação da cena:', {
@@ -670,28 +537,34 @@ async function loadScene(sceneName, cenaOrigemId) {
         let texture = textureCache[`panorama${data.id}`];
         if (!texture) {
             console.warn(`Textura não encontrada para ${sceneName}, carregando agora...`);
+            blockCameraUpdates = true;
             startFade(1, async () => {
                 try {
                     await preloadTextures(data);
                     texture = textureCache[`panorama${data.id}`];
-                    proceedWithSceneLoading(data, texture, cenaOrigemId);
+                    proceedWithSceneLoading(data, texture, cenaOrigemId, entryQuat);
                     startFade(-1);
+                    blockCameraUpdates = false;
                 } catch (error) {
                     console.error(`Erro ao carregar textura para cena ${sceneName}:`, error);
                     startFade(-1);
+                    blockCameraUpdates = false;
                 }
             });
             return;
         }
 
-        proceedWithSceneLoading(data, texture, cenaOrigemId);
+        proceedWithSceneLoading(data, texture, cenaOrigemId, entryQuat);
     } catch (error) {
         console.error(`Erro em loadScene(${sceneName}):`, error);
     }
 }
 
-function proceedWithSceneLoading(data, texture, cenaOrigemId) {
+// ALTERADO: Ignora pitch e roll em VR
+function proceedWithSceneLoading(data, texture, cenaOrigemId, entryQuat = null) {
     try {
+        sceneGroup.quaternion.set(0, 0, 0, 1);
+
         const geometry = new THREE.SphereGeometry(50, 128, 128);
         geometry.scale(-1, 1, 1);
         const material = new THREE.MeshBasicMaterial({ map: texture });
@@ -749,16 +622,14 @@ function proceedWithSceneLoading(data, texture, cenaOrigemId) {
                 console.warn(`Hotspot ${hotspot.name} sem posição válida, usando padrão: x=${x.toFixed(3)}, y=${y.toFixed(3)}, z=${z.toFixed(3)}`);
             }
 
-            mesh.lookAt(0, 0, 0);
-
             hotspotMeshes.push(mesh);
             sceneGroup.add(mesh);
         });
 
         if (!deviceOrientationCamera.enabled) {
             let yaw = data.entrada_rotacao_y || 0;
-            let pitch = data.entrada_rotacao_pitch || 0;
-            let roll = data.entrada_rotacao_roll || 0;
+            let pitch = renderer.xr.isPresenting ? 0 : (data.entrada_rotacao_pitch || 0); // NOVO: Zera pitch em VR
+            let roll = renderer.xr.isPresenting ? 0 : (data.entrada_rotacao_roll || 0);  // NOVO: Zera roll em VR
 
             if (cenaOrigemId) {
                 const hotspotEntrada = data.hotspots.find(hotspot => {
@@ -769,8 +640,8 @@ function proceedWithSceneLoading(data, texture, cenaOrigemId) {
 
                 if (hotspotEntrada) {
                     yaw = calcularRotacaoYDoHotspot(hotspotEntrada.pos_x, hotspotEntrada.pos_y, hotspotEntrada.pos_z);
-                    pitch = hotspotEntrada.entrada_rotacao_pitch || 0;
-                    roll = hotspotEntrada.entrada_rotacao_roll || 0;
+                    pitch = renderer.xr.isPresenting ? 0 : (hotspotEntrada.entrada_rotacao_pitch || 0); // NOVO: Zera pitch em VR
+                    roll = renderer.xr.isPresenting ? 0 : (hotspotEntrada.entrada_rotacao_roll || 0);  // NOVO: Zera roll em VR
                     yaw = (yaw % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
                     console.log(`Rotação do hotspot de entrada: yaw=${yaw.toFixed(3)}, pitch=${pitch.toFixed(3)}, roll=${roll.toFixed(3)} rad`);
                 } else {
@@ -778,9 +649,10 @@ function proceedWithSceneLoading(data, texture, cenaOrigemId) {
                 }
             }
 
-            aplicarRotacaoCamera(yaw, pitch, roll);
+            aplicarRotacaoCamera(yaw, pitch, roll, entryQuat);
         } else {
             deviceOrientationCamera.resetOrientation();
+            sceneGroup.quaternion.set(0, 0, 0, 1);
         }
 
         console.log('Cena carregada:', `panorama${data.id}`);
@@ -795,6 +667,7 @@ function startFade(direction, callback) {
         fadeDirection = direction;
         fadeCallback = callback;
         fading = true;
+        blockCameraUpdates = direction === 1;
     } catch (error) {
         console.error('Erro em startFade:', error);
     }
@@ -813,8 +686,10 @@ function onSelectStart(event) {
             const target = intersects[0].object.userData.target;
             console.log('Hotspot selecionado:', target);
             if (target) {
+                pendingEntryQuat = camera.quaternion.clone();
                 startFade(1, () => {
-                    loadScene(target, cenaAtualId);
+                    loadScene(target, cenaAtualId, pendingEntryQuat);
+                    pendingEntryQuat = null;
                     startFade(-1);
                 });
             }
@@ -838,8 +713,10 @@ function onPointerDown(event) {
         if (intersects.length > 0) {
             const target = intersects[0].object.userData.target;
             if (target) {
+                pendingEntryQuat = camera.quaternion.clone();
                 startFade(1, () => {
-                    loadScene(target, cenaAtualId);
+                    loadScene(target, cenaAtualId, pendingEntryQuat);
+                    pendingEntryQuat = null;
                     startFade(-1);
                 });
             }
@@ -869,22 +746,37 @@ function calcularRotacaoYDoHotspot(pos_x, pos_y, pos_z) {
     }
 }
 
-function aplicarRotacaoCamera(yaw, pitch = 0, roll = 0) {
+// ALTERADO: Garante que apenas yaw seja aplicado ao sceneGroup em VR
+function aplicarRotacaoCamera(yaw, pitch = 0, roll = 0, entryQuat = null) {
     try {
+        let effectivePitch = pitch;
         let effectiveRoll = roll;
 
         if (renderer.xr.isPresenting) {
-            effectiveRoll = 0;
+            effectivePitch = 0; // Zera pitch em VR
+            effectiveRoll = 0;  // Zera roll em VR
         }
 
-        const euler = new THREE.Euler(pitch, yaw, effectiveRoll, 'YXZ');
+        const euler = new THREE.Euler(effectivePitch, yaw, effectiveRoll, 'YXZ');
         const quaternion = new THREE.Quaternion().setFromEuler(euler).normalize();
         savedCameraQuaternion.copy(quaternion);
 
         if (renderer.xr.isPresenting) {
-            const qHeadset = camera.quaternion.clone();
+            let qHeadset = camera.quaternion.clone();
+            if (entryQuat) {
+                qHeadset.copy(entryQuat);
+            }
+            // Extrai apenas o yaw do headset
+            const eulerHeadset = new THREE.Euler().setFromQuaternion(qHeadset, 'YXZ');
+            eulerHeadset.x = 0; // Remove pitch
+            eulerHeadset.z = 0; // Remove roll
+            const qHeadsetYawOnly = new THREE.Quaternion().setFromEuler(eulerHeadset);
+            
             const qDesiredInv = quaternion.clone().invert();
-            sceneGroup.quaternion.copy(qHeadset.multiply(qDesiredInv));
+            sceneGroup.quaternion.copy(qHeadsetYawOnly.multiply(qDesiredInv));
+
+            // NOVO: Log para depuração
+            console.log(`sceneGroup quaternion após aplicar rotação:`, sceneGroup.quaternion.toArray());
         } else {
             camera.quaternion.copy(quaternion);
             if (controls.enabled) {
@@ -896,7 +788,8 @@ function aplicarRotacaoCamera(yaw, pitch = 0, roll = 0) {
         }
 
         console.log(
-            `>> Rotação aplicada: yaw=${yaw.toFixed(3)}, pitch=${pitch.toFixed(3)}, roll=${effectiveRoll.toFixed(3)}`
+            `>> Rotação aplicada: yaw=${yaw.toFixed(3)}, pitch=${effectivePitch.toFixed(3)}, roll=${effectiveRoll.toFixed(3)}` +
+            (entryQuat ? ` (usando entryQuat salvo)` : '')
         );
     } catch (error) {
         console.error('Erro em aplicarRotacaoCamera:', error);
@@ -1043,11 +936,13 @@ function render(time, frame) {
             }
         }
 
-        if (!renderer.xr.isPresenting && deviceOrientationCamera.enabled) {
-            deviceOrientationCamera.update();
-            console.log('DeviceOrientationCamera updating');
-        } else if (!renderer.xr.isPresenting && controls.enabled) {
-            controls.update();
+        if (!blockCameraUpdates) {
+            if (!renderer.xr.isPresenting && deviceOrientationCamera.enabled) {
+                deviceOrientationCamera.update();
+                console.log('DeviceOrientationCamera updating');
+            } else if (!renderer.xr.isPresenting && controls.enabled) {
+                controls.update();
+            }
         }
 
         if (fading) {
@@ -1102,24 +997,20 @@ function render(time, frame) {
         }
 
         hotspotMeshes.forEach(mesh => {
-            mesh.lookAt(camera.position);
+            updateUprightBillboard(mesh, camera);
         });
 
         if (intersected) {
             atualizarDescricaoTexto(intersected.userData.descricao || '', intersected);
             descricaoSprite.position.copy(intersected.position);
             descricaoSprite.position.y += 3;
-            descricaoSprite.lookAt(camera.position);
+            updateUprightBillboard(descricaoSprite, camera);
             descricaoSprite.visible = true;
         } else {
             descricaoSprite.visible = false;
         }
 
-        // Update audio listener position to follow camera
-        if (audioListener) {
-            audioListener.position.copy(camera.position);
-            audioListener.quaternion.copy(camera.quaternion);
-        }
+        console.log('sceneGroup quaternion:', sceneGroup.quaternion.toArray());
 
         renderer.render(scene, camera);
     } catch (error) {

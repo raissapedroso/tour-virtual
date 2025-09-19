@@ -29,6 +29,7 @@ export async function carregarTodasAsCenas(idCena, cenasCarregadas = new Set()) 
             console.error(`Erro ao carregar cena ${idCena}:`, erroCena.message);
             throw new Error(`Erro ao carregar cena ${idCena}: ${erroCena.message}`);
         }
+        console.log(`Precarregando textura - ID: ${cena.id}, Imagem: ${cena.image}`);
 
         const { data: hotspots, error: erroHotspots } = await supabase
             .from('hotspots')
@@ -70,7 +71,7 @@ export async function carregarTodasAsCenas(idCena, cenasCarregadas = new Set()) 
                     return {
                         name: hotspot.descricao,
                         target: hotspot.cena_destino ? `panorama${hotspot.cena_destino.id}` : null,
-                        icon: 'icone8.png', // Assumindo um ícone padrão
+                        icon: 'bolaHots.png', // Assumindo um ícone padrão
                         pos_x: hotspot.pos_x,
                         pos_y: hotspot.pos_y,
                         pos_z: hotspot.pos_z,
