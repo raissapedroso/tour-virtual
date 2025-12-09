@@ -13,23 +13,29 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 export async function carregarTodasAsCenas(idCena, cenasCarregadas = new Set()) {
     try {
         idCena = Number(idCena);
-        if (cenasCarregadas.has(idCena)) {
-            return null;
-        }
+        if (cenasCarregadas.has(idCena)) return null;
         cenasCarregadas.add(idCena);
 
-        // Adicione ', capture_height' aqui se a coluna existir no banco
+        // Puxando dados da cena incluindo as novas colunas de posição
         const { data: cena, error: erroCena } = await supabase
             .from('cenas')
-            .select('id, caminho_imagem, entrada_rotacao_y, entrada_rotacao_pitch, entrada_rotacao_roll') // Adicione capture_height se disponível
+            .select(`
+                id, 
+                caminho_imagem, 
+                descricao,
+                entrada_rotacao_y, 
+                entrada_rotacao_pitch, 
+                entrada_rotacao_roll, 
+                offset_roll,
+                texto,
+                pos_x,
+                pos_y,
+                pos_z
+            `)
             .eq('id', idCena)
             .single();
 
-        if (erroCena) {
-            console.error(`Erro ao carregar cena ${idCena}:`, erroCena.message);
-            throw new Error(`Erro ao carregar cena ${idCena}: ${erroCena.message}`);
-        }
-        console.log(`Precarregando textura - ID: ${cena.id}, Imagem: ${cena.image}`);
+        if (erroCena) throw new Error(`Erro ao carregar cena ${idCena}: ${erroCena.message}`);
 
         const { data: hotspots, error: erroHotspots } = await supabase
             .from('hotspots')
@@ -51,51 +57,69 @@ export async function carregarTodasAsCenas(idCena, cenasCarregadas = new Set()) 
             `)
             .eq('cena_origem', idCena);
 
-        if (erroHotspots) {
-            console.error(`Erro ao carregar hotspots para cena ${idCena}:`, erroHotspots.message);
-            throw new Error(`Erro ao carregar hotspots: ${erroHotspots.message}`);
-        }
-
-        if (hotspots.length === 0) {
-            console.warn(`Nenhum hotspot encontrado para cena ${idCena}`);
-        }
+        if (erroHotspots) throw new Error(`Erro ao carregar hotspots: ${erroHotspots.message}`);
 
         const hotspotsComDestinos = await Promise.all(
             hotspots.map(async (hotspot) => {
-                try {
-                    const destinoId = hotspot.cena_destino?.id;
-                    const cenaDestinoCompleta = destinoId && !cenasCarregadas.has(destinoId)
-                        ? await carregarTodasAsCenas(destinoId, cenasCarregadas)
-                        : null;
+                const destinoId = hotspot.cena_destino?.id;
+                const cenaDestinoCompleta = destinoId && !cenasCarregadas.has(destinoId)
+                    ? await carregarTodasAsCenas(destinoId, cenasCarregadas)
+                    : null;
 
-                    return {
-                        name: hotspot.descricao,
-                        target: hotspot.cena_destino ? `panorama${hotspot.cena_destino.id}` : null,
-                        icon: 'bolaHots.png', // Assumindo um ícone padrão
-                        pos_x: hotspot.pos_x,
-                        pos_y: hotspot.pos_y,
-                        pos_z: hotspot.pos_z,
-                        entrada_rotacao_y: hotspot.yaw ? THREE.MathUtils.degToRad(hotspot.yaw) : (hotspot.entrada_rotacao_y ? THREE.MathUtils.degToRad(hotspot.entrada_rotacao_y) : 0),
-                        entrada_rotacao_pitch: hotspot.pitch ? THREE.MathUtils.degToRad(hotspot.pitch) : 0,
-                        entrada_rotacao_roll: hotspot.roll ? THREE.MathUtils.degToRad(hotspot.roll) : 0,
-                        cena_destino: cenaDestinoCompleta
-                    };
-                } catch (error) {
-                    console.error(`Erro ao processar hotspot ${hotspot.id}:`, error);
-                    return null;
-                }
+                return {
+                    name: hotspot.descricao,
+                    target: hotspot.cena_destino ? `panorama${hotspot.cena_destino.id}` : null,
+                    icon: hotspot.icon || 'bolaHots.png',
+                    pos_x: hotspot.pos_x,
+                    pos_y: hotspot.pos_y,
+                    pos_z: hotspot.pos_z,
+                    entrada_rotacao_y: hotspot.yaw ? THREE.MathUtils.degToRad(hotspot.yaw) : (hotspot.entrada_rotacao_y ? THREE.MathUtils.degToRad(hotspot.entrada_rotacao_y) : 0),
+                    entrada_rotacao_pitch: hotspot.pitch ? THREE.MathUtils.degToRad(hotspot.pitch) : 0,
+                    entrada_rotacao_roll: hotspot.roll ? THREE.MathUtils.degToRad(hotspot.roll) : 0,
+                    cena_destino: cenaDestinoCompleta,
+                    texto: hotspot.texto
+                };
             })
         );
 
-        return {
+        // Mapeia os dados da cena para o formato esperado pelo Three.js
+        const cenaData = {
             id: cena.id,
             image: cena.caminho_imagem,
+            descricao: cena.descricao,
             entrada_rotacao_y: cena.entrada_rotacao_y ? THREE.MathUtils.degToRad(cena.entrada_rotacao_y) : 0,
             entrada_rotacao_pitch: cena.entrada_rotacao_pitch ? THREE.MathUtils.degToRad(cena.entrada_rotacao_pitch) : 0,
             entrada_rotacao_roll: cena.entrada_rotacao_roll ? THREE.MathUtils.degToRad(cena.entrada_rotacao_roll) : 0,
+            offset_roll: cena.offset_roll ? THREE.MathUtils.degToRad(cena.offset_roll) : 0,
+            pos_x: cena.pos_x,
+            pos_y: cena.pos_y,
+            pos_z: cena.pos_z,
             hotspots: hotspotsComDestinos.filter(h => h !== null),
-            captureHeight: cena.capture_height || 1.2  // Default 1.2m (ajuste ou adicione coluna no banco)
+            captureHeight: 1.6,
+            textoCena: cena.texto 
         };
+
+        // Se a cena tiver texto, criamos um hotspot especial para a legenda da cena
+        if (cena.texto) {
+            
+            const legendaHotspot = {
+                name: `${cena.descricao}`, // Nome para identificação
+                target: null,
+                icon: null, // Sem ícone
+                pos_x: cena.pos_x || 0, // Usa posição da cena se disponível, senão padrão
+                pos_y: (cena.pos_y || 1.6) + 0.5, // Acima da posição da cena
+                pos_z: cena.pos_z || -2,
+                entrada_rotacao_y: 0,
+                entrada_rotacao_pitch: 0,
+                entrada_rotacao_roll: 0,
+                texto: cena.texto,
+                isLegenda: true,
+                tipo: 'textoCena' 
+            };
+            cenaData.hotspots.push(legendaHotspot);
+        }
+        return cenaData;
+
     } catch (error) {
         console.error(`Erro em carregarTodasAsCenas(${idCena}):`, error);
         throw error;
