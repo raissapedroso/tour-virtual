@@ -42,7 +42,6 @@ img {
     backdrop-filter: blur(8px); /* efeito de vidro fosco */
 }
 
-
 #loading-bg img {
     display: block;
     width: auto;
@@ -53,9 +52,6 @@ img {
     filter: drop-shadow(0 0 10px #fff6);
     object-fit: contain;
 }
-
-
-
 
 #loading-text {
     font-size: 1.5em;
@@ -79,48 +75,50 @@ img {
     gap: 10px;
 }
 
-.control-button {
-    padding: 10px 15px;
-    background-color: #ff3333;
-    color: #ffffff;
-    border: none;
-    border-radius: 8px;
-    font-family: 'Arial', sans-serif;
-    font-size: 16px;
-    font-weight: bold;
-    cursor: pointer;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-    transition: background-color 0.2s, transform 0.1s;
-}
+/* =========================
+   BOTÃO DE CONTROLE (VR / ORIENTAÇÃO)
+========================= */
 
-.control-button:hover {
-    background-color: #cc0000;
-    transform: scale(1.05);
-}
-
-.control-button:active {
-    transform: scale(0.95);
-}
-
+.control-button,
 button[ar-button] {
-    padding: 10px 15px;
-    background-color: #ff3333;
-    color: #ffffff;
-    border: none;
-    border-radius: 8px;
-    font-family: 'Arial', sans-serif;
-    font-size: 16px;
-    font-weight: bold;
+    position: fixed;
+    bottom: 16px;
+    right: 16px; /* canto inferior direito */
+    
+    padding: 6px 12px;          /* menor */
+    font-size: 13px;            /* menor */
+    font-weight: 500;
+
+    background: rgba(0, 0, 0, 0.6); /* cinza escuro discreto */
+    color: #e0e0e0;
+
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 10px;
+
+    font-family: 'Segoe UI', Arial, sans-serif;
     cursor: pointer;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-    transition: background-color 0.2s, transform 0.1s;
+
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+
+    transition:
+        background 0.3s ease,
+        transform 0.2s ease,
+        opacity 0.3s ease;
+
+    z-index: 20;
 }
 
+/* Hover suave */
+.control-button:hover,
 button[ar-button]:hover {
-    background-color: #cc0000;
-    transform: scale(1.05);
+    background: rgba(0, 0, 0, 0.8);
+    transform: scale(1.04);
 }
 
+/* Clique */
+.control-button:active,
 button[ar-button]:active {
-    transform: scale(0.95);
+    transform: scale(0.96);
 }

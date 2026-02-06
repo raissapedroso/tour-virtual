@@ -22,7 +22,15 @@ const DESKTOP_SETTINGS = {
     CANVAS_HEIGHT: 128
 };
 
-// Variáveis principais
+const LABEL_SETTINGS = {
+    VR_DISTANCE: 1.2,
+    VR_Y_OFFSET: 0.7, // altura acima do centro da câmera
+    VR_WIDTH: 1.0, // largura do painel em metros no VR
+    FONT_SIZE: 36,
+    PADDING: 15
+}
+
+// variáveis usadas
 let camera, scene, renderer, controls, deviceOrientationCamera;
 let raycaster, tempMatrix;
 let hotspotMeshes = [];
@@ -50,6 +58,10 @@ let blockCameraUpdates = false;
 let vrInfoPanelMesh = null;
 const metadataCache = {};
 const ImageLoader = new THREE.ImageLoader();
+
+let sceneLabelMesh = null;
+let desktopLabelDiv = null; 
+
 // Captura erros não tratados
 window.addEventListener('unhandledrejection', (event) => {
     console.error('Erro não tratado em promessa:', event.reason, event);
@@ -77,11 +89,37 @@ window.fecharPainel = function() {
     painel.setAttribute('aria-hidden', 'true');
 };
 
-// Conecta listeners depois que DOM estiver pronto
+// conecta listeners depois que DOM estiver pronto
 (function attachInfoPanelListeners() {
     function init() {
         const painel = document.getElementById('infoPanel');
         const closeBtn = document.getElementById('infoClose');
+        
+        // criação do elemento HTML 
+        desktopLabelDiv = document.createElement('div');
+        desktopLabelDiv.id = 'scene-label-hud';
+        desktopLabelDiv.style.cssText = `
+            position: absolute; 
+            top: 5vh; /* Ajustado para 5vh para ser menos intrusivo */
+            left: 50%; 
+            transform: translateX(-50%); 
+            padding: 12px 25px; /* Mais preenchimento */
+            background: rgba(42, 152, 61, 0.85); /* Fundo escuro e opaco */
+            color: white; 
+            font-size: 24px; 
+            font-weight: bold; /* Fonte mais forte */
+            font-family: 'Segoe UI', Arial, sans-serif; 
+            border-radius: 12px; /* Cantos mais arredondados */
+            pointer-events: none; 
+            opacity: 0; 
+            transition: opacity 0.5s, transform 0.5s;
+            z-index: 10;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5); /* Sombra para destaque */
+            -webkit-backdrop-filter: blur(3px); /* Efeito de vidro (moderno) */
+            backdrop-filter: blur(3px);
+            border: 1px solid rgba(255, 255, 255, 0.1); /* Borda sutil */
+        `;
+        document.body.appendChild(desktopLabelDiv);
 
         if (!painel || !closeBtn) {
             console.warn('Painel ou botão de fechar não encontrados ao inicializar listeners');
@@ -109,7 +147,7 @@ window.fecharPainel = function() {
     }
 })();
 
-// Funções para geração de cores
+// funções para geração de cores
 function hashString(str) {
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
@@ -123,7 +161,7 @@ function hashString(str) {
 function getRgbaFromHash(hash, saturation = 0.7, lightness = 0.3, alpha = 0.9) {
     const hue = (hash % 360) / 360;
     const color = new THREE.Color().setHSL(hue, saturation, lightness);
-    return `rgba(${Math.floor(color.r * 255)}, ${Math.floor(color.g * 255)}, ${Math.floor(color.b * 255)}, ${alpha})`; // CORREÇÃO: Usar r, g, b para a cor
+    return `rgba(${Math.floor(color.r * 255)}, ${Math.floor(color.g * 255)}, ${Math.floor(color.b * 255)}, ${alpha})`;
 }
 
 
@@ -151,6 +189,7 @@ function getCenaById(id) {
 
     return {
         id: id,
+        label: raw.label || `Cena ${id}`, // Adiciona o campo label com fallback
         image: raw.image,
         initialYaw: raw.initialYaw || 0, // Manter o initialYaw em graus
         entrada_rotacao_y: THREE.MathUtils.degToRad(raw.initialYaw || 0),
@@ -165,17 +204,17 @@ function getCenaById(id) {
     };
 }
 
-
 init();
 animate();
 
-// Carrega cena inicial
+// carrega cena inicial
 const initialData = getCenaById(1);
 if (initialData) {
     (async () => {
         try {
             await preloadTextures(initialData);
-            await loadScene(`panorama${initialData.id}`);
+      
+            await loadScene(`panorama${initialData.id}`); 
             const loadingScreen = document.getElementById('loading-screen');
             if (loadingScreen) loadingScreen.style.display = 'none';
             preloadRemainingTextures(initialData);
@@ -191,24 +230,15 @@ function init() {
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
     
-    // ===============================================
-    // 🎨 CORREÇÃO PARA GATILHOS PRETOS: ILUMINAÇÃO
-    // AJUSTE: Aumentar intensidade da luz ambiente e direcional
-    // ===============================================
-    
     // 1. Luz de Ambiente (suave, para preencher sombras e dar cor base)
-    // Aumentar a intensidade para garantir que MeshBasicMaterial seja visível.
-    const ambientLight = new THREE.AmbientLight(0xffffff, 5.0); // Cor branca, Intensidade 5.0 (alto para VR/panoramas)
+    const ambientLight = new THREE.AmbientLight(0xffffff, 5.0); 
     scene.add(ambientLight);
 
     // 2. Luz Direcional (para dar contraste e realce)
-    // Aumentar a intensidade.
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 8.0); // Luz branca, Intensidade 8.0 (alto para VR/panoramas)
-    directionalLight.position.set(0, 10, 5); // Posição
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 8.0); 
+    directionalLight.position.set(0, 10, 5);
     scene.add(directionalLight);
     
-    // ===============================================
-
     sceneGroup = new THREE.Group();
     scene.add(sceneGroup);
 
@@ -350,6 +380,10 @@ function init() {
         deviceOrientationCamera.enabled = false;
         deviceOrientationButton.style.display = 'none';
         sceneGroup.quaternion.set(0, 0, 0, 1);
+        
+        // OCULTA O HUD DE DESKTOP E MOSTRA O MESH DE VR
+        desktopLabelDiv.style.opacity = 0;
+        if (sceneLabelMesh) sceneLabelMesh.visible = true;
     });
 
     renderer.xr.addEventListener('sessionend', () => {
@@ -382,6 +416,10 @@ function init() {
             vrInfoPanelMesh.material.map.dispose();
             vrInfoPanelMesh.visible = false;
         }
+        
+        // MOSTRA O HUD DE DESKTOP E OCULTA O MESH DE VR
+        if (desktopLabelDiv) desktopLabelDiv.style.opacity = 1;
+        if (sceneLabelMesh) sceneLabelMesh.visible = false;
     });
 
     const grip1 = renderer.xr.getControllerGrip(0);
@@ -442,29 +480,6 @@ function updateUprightBillboard(mesh, camera) {
     const e = new THREE.Euler().setFromQuaternion(mesh.quaternion, 'YXZ');
     e.x = e.z = 0;
     mesh.quaternion.setFromEuler(e);
-}
-
-function calcularRotacaoYDoHotspot(x, y, z) {
-    return Math.atan2(x, z);
-}
-
-function aplicarRotacaoCamera(yaw, pitch = 0, roll = 0, entryQuat = null) {
-    const e = new THREE.Euler(pitch, yaw, roll, 'YXZ');
-    const q = new THREE.Quaternion().setFromEuler(e).normalize();
-    savedCameraQuaternion.copy(q);
-    if (renderer.xr.isPresenting) {
-        let qHead = entryQuat ? entryQuat.clone() : camera.quaternion.clone();
-        const eHead = new THREE.Euler().setFromQuaternion(qHead, 'YXZ');
-        eHead.x = eHead.z = 0;
-        const qYaw = new THREE.Quaternion().setFromEuler(eHead);
-        sceneGroup.quaternion.copy(qYaw.multiply(q.invert()));
-    } else {
-        camera.quaternion.copy(q);
-        if (controls.enabled) {
-            controls.target.set(0, 0, -0.001).applyQuaternion(q).add(camera.position);
-            controls.update();
-        }
-    }
 }
 
 function updateLaser(controller) {
@@ -806,7 +821,7 @@ function salvarHistoricoCena(cenaId) {
     }
 }
 
-// ===== CARREGAR CENA =====
+// carregar cena
 async function loadScene(sceneName, cenaOrigemId, entryQuat = null) {
     const id = parseInt(sceneName.replace('panorama', ''), 10);
     const data = getCenaById(id);
@@ -834,6 +849,12 @@ async function loadScene(sceneName, cenaOrigemId, entryQuat = null) {
     
     // Certifica-se de que o painel VR esteja escondido ao carregar nova cena
     if (vrInfoPanelMesh) vrInfoPanelMesh.visible = false;
+    
+    // ====================================================================
+    // ATUALIZAÇÃO DO RÓTULO DA CENA: USA O data.label
+    // ====================================================================
+    updateSceneLabel(data.label);
+    // ====================================================================
 
 
     let texture = textureCache[`panorama${data.id}`];
@@ -852,7 +873,7 @@ async function loadScene(sceneName, cenaOrigemId, entryQuat = null) {
     proceedWithSceneLoading(data, texture, cenaOrigemId, entryQuat);
 }
 
-// ===== PROCESSAR CENA =====
+// processar cena 
 function proceedWithSceneLoading(data, texture, cenaOrigemId, entryQuat = null) {
     hotspotMeshes.forEach(m => sceneGroup.remove(m));
     textMeshes.forEach(m => sceneGroup.remove(m));
@@ -952,12 +973,8 @@ function proceedWithSceneLoading(data, texture, cenaOrigemId, entryQuat = null) 
             const geo = new THREE.CircleGeometry(0.5, 32);
             
             // Navegação (target) é Verde, Informativo (sem target) é Amarelo
-            // Usando MeshLambertMaterial em vez de MeshBasicMaterial para interagir com a nova iluminação
             const color = hotspot.target ? 0x00ff00 : 0xffff00;
             
-            // **MUDANÇA AQUI**: Usar MeshPhongMaterial ou MeshStandardMaterial para melhor interação com a luz
-            // MeshBasicMaterial também funciona se a luz ambiente for alta o suficiente (como ajustado em init)
-            // Mantendo MeshBasicMaterial, mas assegurando que as luzes estão ativas.
             mat = new THREE.MeshBasicMaterial({ color: color, side: THREE.DoubleSide });
             mesh = new THREE.Mesh(geo, mat);
         }
@@ -981,8 +998,6 @@ function proceedWithSceneLoading(data, texture, cenaOrigemId, entryQuat = null) 
         mesh.position.copy(pos);
         hotspotMeshes.push(mesh);
         sceneGroup.add(mesh);
-        
-        // **NENHUM TEXTMESH FLUTUANTE CRIADO AQUI**
     });
 
     // ---------- APLICA ROTAÇÃO INICIAL DA CÂMERA ----------
@@ -1016,7 +1031,7 @@ function proceedWithSceneLoading(data, texture, cenaOrigemId, entryQuat = null) 
     preloadRemainingTextures(data);
 }
 
-// ===== INTERAÇÃO VR: onSelectStart =====
+// interação VR
 function onSelectStart(event) {
     const controller = event.target;
     tempMatrix.identity().extractRotation(controller.matrixWorld);
@@ -1061,7 +1076,7 @@ function onSelectStart(event) {
     }
 }
 
-// ===== INTERAÇÃO DESKTOP: onPointerDown =====
+// interação desktop
 function onPointerDown(event) {
     if (renderer.xr.isPresenting) return;
 
@@ -1092,7 +1107,6 @@ function onPointerDown(event) {
     }
 }
 
-// ===== RENDER LOOP =====
 function animate() {
     renderer.setAnimationLoop(render);
 }
@@ -1111,6 +1125,23 @@ function render(time, frame) {
             baseReferenceSpace = newSpace;
         }
     }
+    
+    // ====================================================================
+    // POSICIONAMENTO DO RÓTULO DA CENA (VR): Fixo à frente da câmera
+    // ====================================================================
+    if (sceneLabelMesh && renderer.xr.isPresenting) {
+        const camPos = camera.position.clone();
+        const camQuat = camera.quaternion.clone();
+        
+        // 1. Posição: Distância frontal e altura
+        const forwardVector = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuat);
+        sceneLabelMesh.position.copy(camPos).add(forwardVector.multiplyScalar(LABEL_SETTINGS.VR_DISTANCE));
+        sceneLabelMesh.position.y = camPos.y + LABEL_SETTINGS.VR_Y_OFFSET;
+        
+        // 2. Orientação: Sempre virado para a câmera
+        updateUprightBillboard(sceneLabelMesh, camera);
+    }
+    // ====================================================================
 
     if (!blockCameraUpdates) {
         if (!renderer.xr.isPresenting && deviceOrientationCamera.enabled) {
@@ -1179,7 +1210,7 @@ function render(time, frame) {
             const hash = hashString(intersected.userData.descricao); 
             atualizarDescricaoTexto(intersected.userData.descricao, intersected);
             
-            // **CORREÇÃO AQUI**: Aumentar o offset vertical (de 1.2 para 1.8) para levantar o texto
+            // Aumentar o offset vertical para levantar o texto
             descricaoSprite.position.copy(intersected.position).y += 1.8;
             
             updateUprightBillboard(descricaoSprite, camera);
@@ -1194,29 +1225,154 @@ function render(time, frame) {
     renderer.render(scene, camera);
 }
 
-// ===== FUNÇÕES DE PAINEL VR E TEXTO =====
+function criarLabelMesh(texto) {
+    if (!texto) return null;
+    
+    // 1. Configurações e Hash
+    const hash = hashString(texto);
+    const colorHash1 = getRgbaFromHash(hash, 0.5, 0.4, 0.95);
+    const colorHash2 = getRgbaFromHash(hash, 0.5, 0.3, 0.95);
+    const fontSize = LABEL_SETTINGS.FONT_SIZE;
+    const padding = LABEL_SETTINGS.PADDING;
+    // Fonte mais moderna e arrojada
+    const font = `bold ${fontSize}px 'Segoe UI', Arial, sans-serif`; 
+    
+    // 2. Criação do Canvas
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    context.font = font;
+
+    const textMetrics = context.measureText(texto);
+    const textWidth = textMetrics.width;
+    const textHeight = fontSize * 1.3; // Aumentado ligeiramente para espaço vertical
+    
+    canvas.width = textWidth + padding * 3; // Mais padding horizontal
+    canvas.height = textHeight + padding * 2;
+    
+    // 3. Desenho no Canvas
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.font = font;
+
+    // Fundo (Rounded Rect)
+    const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
+    gradient.addColorStop(0, colorHash1);
+    gradient.addColorStop(1, colorHash2);
+    context.fillStyle = gradient;
+    
+    const radius = 15; // Aumentado o raio
+    function drawRoundedRect(ctx, x, y, width, height, radius) {
+        ctx.beginPath();
+        ctx.moveTo(x + radius, y);
+        ctx.lineTo(x + width - radius, y);
+        ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+        ctx.lineTo(x + width, y + height - radius);
+        ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+        ctx.lineTo(x + radius, y + height);
+        ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+        ctx.lineTo(x, y + radius);
+        ctx.quadraticCurveTo(x, y, x + radius, y);
+        ctx.closePath();
+        ctx.fill();
+        // Adiciona uma borda branca sutil
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)'; 
+        ctx.lineWidth = 4;
+        ctx.stroke();
+    }
+    drawRoundedRect(context, 0, 0, canvas.width, canvas.height, radius);
+
+    // Texto
+    context.fillStyle = '#ffffff';
+    context.textAlign = 'center';
+    context.textBaseline = 'middle'; 
+    context.shadowColor = 'rgba(0, 0, 0, 0.9)'; // Sombra mais forte
+    context.shadowBlur = 8;
+    context.shadowOffsetX = 3;
+    context.shadowOffsetY = 3;
+    context.fillText(texto, canvas.width / 2, canvas.height / 2);
+    context.shadowBlur = 0;
+
+    // 4. Criação do Mesh
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+
+    const material = new THREE.MeshBasicMaterial({ 
+        map: texture, 
+        transparent: true, 
+        alphaTest: 0.1, 
+        side: THREE.DoubleSide,
+        depthTest: false,
+        depthWrite: false
+    }); 
+    const geometry = new THREE.PlaneGeometry(1, 1); 
+    const mesh = new THREE.Mesh(geometry, material);
+    
+    // 5. Escala para o Mundo VR
+    const aspect = canvas.width / canvas.height;
+    const targetWidth = LABEL_SETTINGS.VR_WIDTH;
+    mesh.scale.set(targetWidth, targetWidth / aspect, 1);
+    mesh.renderOrder = 997; 
+
+    return mesh;
+}
+
+function updateSceneLabel(label) {
+    if (renderer.xr.isPresenting) {
+        // Modo VR: Usar Mesh 3D fixo à câmera
+        if (sceneLabelMesh) {
+            disposeMesh(sceneLabelMesh);
+            scene.remove(sceneLabelMesh);
+            sceneLabelMesh = null;
+        }
+        
+        sceneLabelMesh = criarLabelMesh(label);
+        if (sceneLabelMesh) {
+            scene.add(sceneLabelMesh);
+        }
+        
+        // Esconder HUD de Desktop
+        if (desktopLabelDiv) desktopLabelDiv.style.opacity = 0;
+        
+    } else {
+        // Modo Desktop/Mobile: Usar HUD HTML/CSS
+        if (desktopLabelDiv) {
+            desktopLabelDiv.textContent = label ? `📍 ${label}` : '';
+
+            desktopLabelDiv.style.opacity = label ? 1 : 0;
+        }
+        
+        // Esconder Mesh de VR
+        if (sceneLabelMesh) {
+            disposeMesh(sceneLabelMesh);
+            scene.remove(sceneLabelMesh);
+            sceneLabelMesh = null;
+        }
+    }
+}
+// funções de painel VR
 
 function createVrInfoPanelContent(texto, hotspotHash) {
-    // Reusa a lógica de criação de texto para gerar o painel grande para VR
+    // reusa a lógica de criação de texto para gerar o painel grande para VR
     const panelMesh = criarTextoMesh(texto, hotspotHash, true); 
     const canvas = panelMesh.material.map.image;
     const ctx = canvas.getContext('2d');
     const w = canvas.width;
     const h = canvas.height;
 
-    // Desenha o botão de fechar (X) no canto superior direito
+    // desenha o botão de fechar (X) no canto superior direito
     const buttonSize = VR_SETTINGS.FONT_SIZE_VR * 1.2;
     const padding = VR_SETTINGS.PANEL_PADDING;
     const buttonX = w - buttonSize - padding;
     const buttonY = padding;
 
-    // Fundo do botão (vermelho)
+    // fundo do botão (vermelho)
     ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
     ctx.beginPath();
     ctx.arc(buttonX + buttonSize / 2, buttonY + buttonSize / 2, buttonSize / 2, 0, Math.PI * 2);
     ctx.fill();
 
-    // Texto do botão (X)
+    // texto do botão (X)
     ctx.fillStyle = 'white';
     ctx.font = `${buttonSize * 0.8}px Arial, sans-serif`;
     ctx.textAlign = 'center';
@@ -1225,12 +1381,12 @@ function createVrInfoPanelContent(texto, hotspotHash) {
 
     panelMesh.material.map.needsUpdate = true;
     
-    // Escala o painel para um tamanho padrão no mundo (ex: 2.5 metros de largura)
+    // escala o painel para um tamanho padrão no mundo (ex: 2.5 metros de largura)
     const targetWidth = VR_SETTINGS.PANEL_WIDTH; 
     const aspect = w / h;
     panelMesh.scale.set(targetWidth, targetWidth / aspect, 1);
     
-    // Armazena as dimensões do botão no userData para hideVrPanelIfClicked
+    // armazena as dimensões do botão no userData para hideVrPanelIfClicked
     panelMesh.userData.closeButton = {
         x: buttonX,
         y: buttonY,
@@ -1262,25 +1418,24 @@ function showVrPanelAtHotspot(texto, hotspotPosition) {
     
     vrInfoPanelMesh = panel;
     vrInfoPanelMesh.renderOrder = 998; 
-    // CORREÇÃO: Adiciona à cena principal (scene)
+   
     scene.add(vrInfoPanelMesh); 
 
-    // 3. Posiciona o painel na frente da câmera
-    // Calcula a direção de visualização atual da câmera
+    // 3. posiciona o painel na frente da câmera
+    // calcula a direção de visualização atual da câmera
     const cameraDirection = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
     const cameraPosition = camera.position.clone();
     
-    // Coloca a uma distância fixa da câmera
+    // coloca a uma distância fixa da câmera
     const panelDistance = VR_SETTINGS.PANEL_DISTANCE;
     vrInfoPanelMesh.position.copy(cameraPosition).add(cameraDirection.multiplyScalar(panelDistance));
     
-    // Altura: no nível do olho (cameraPosition.y)
+    // altura: no nível do olho (cameraPosition.y)
     vrInfoPanelMesh.position.y = cameraPosition.y; 
 
     updateUprightBillboard(vrInfoPanelMesh, camera);
     vrInfoPanelMesh.visible = true;
 }
-
 
 function criarTextoMesh(texto, hotspotHash, isVR = renderer.xr.isPresenting) {
     const settings = isVR ? VR_SETTINGS : DESKTOP_SETTINGS;
@@ -1291,8 +1446,8 @@ function criarTextoMesh(texto, hotspotHash, isVR = renderer.xr.isPresenting) {
     const font = `${fontSize}px Arial, sans-serif`;
     context.font = font;
 
-    // Simulação inicial para calcular o tamanho
-    context.font = font; // Reaplicar fonte
+    // simulação inicial para calcular o tamanho
+    context.font = font; 
     let lines = [];
     let currentLine = '';
     const maxWidth = isVR ? (settings.CANVAS_RESOLUTION - settings.PANEL_PADDING * 2) : (settings.CANVAS_WIDTH * 0.8);
@@ -1314,10 +1469,10 @@ function criarTextoMesh(texto, hotspotHash, isVR = renderer.xr.isPresenting) {
     let textWidth = Math.max(...lines.map(l => context.measureText(l).width), 100);
     let textHeight = lines.length * lineH;
     
-    // Define o tamanho do canvas com base no conteúdo (garantindo altura mínima para o botão 'X' no VR)
+    // define o tamanho do canvas com base no conteúdo (garantindo altura mínima para o botão 'X' no VR)
     let requiredHeight = textHeight + padding * 2;
     if (isVR) {
-         // Altura mínima para o botão de fechar e o padding (FONT_SIZE_VR * 1.2 + 2 * PANEL_PADDING)
+         // altura mínima para o botão de fechar e o padding (FONT_SIZE_VR * 1.2 + 2 * PANEL_PADDING)
         const minVrHeight = VR_SETTINGS.FONT_SIZE_VR * 1.2 + VR_SETTINGS.PANEL_PADDING * 2;
         requiredHeight = Math.max(requiredHeight, minVrHeight);
     }
@@ -1325,12 +1480,6 @@ function criarTextoMesh(texto, hotspotHash, isVR = renderer.xr.isPresenting) {
     canvas.width = isVR ? settings.CANVAS_RESOLUTION : Math.min(settings.CANVAS_WIDTH, textWidth + padding * 2);
     canvas.height = isVR ? Math.min(requiredHeight, settings.CANVAS_RESOLUTION * (settings.PANEL_MAX_HEIGHT / settings.PANEL_WIDTH)) : Math.min(settings.CANVAS_HEIGHT, requiredHeight);
     
-    // Redefine maxWidth e textWidth se o canvas.width foi ajustado
-    if (isVR) {
-         // Recalcula a largura de texto máxima para quebra de linha se o canvas.width for o mesmo que CANVAS_RESOLUTION
-    }
-
-    // Desenha o conteúdo real
     const finalWidth = canvas.width;
     const finalHeight = canvas.height;
     
@@ -1366,13 +1515,13 @@ function criarTextoMesh(texto, hotspotHash, isVR = renderer.xr.isPresenting) {
 
     context.fillStyle = '#ffffff';
     context.textAlign = 'center';
-    context.textBaseline = 'top'; // Mudado para 'top' para melhor controle das linhas
+    context.textBaseline = 'top'; 
     context.shadowColor = 'rgba(0, 0, 0, 0.8)';
     context.shadowBlur = isVR ? 6 : 4;
     context.shadowOffsetX = isVR ? 2 : 1;
     context.shadowOffsetY = isVR ? 2 : 1;
 
-    // Desenha as linhas de texto centralizadas
+    // desenha as linhas de texto centralizadas
     lines.forEach((line, index) => {
         const yPos = padding + index * lineH;
         context.fillText(line, finalWidth / 2, yPos);
@@ -1389,11 +1538,11 @@ function criarTextoMesh(texto, hotspotHash, isVR = renderer.xr.isPresenting) {
 
     const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, alphaTest: 0.1, side: THREE.DoubleSide }); // Usar MeshBasicMaterial/PlaneGeometry no VR para melhor hitbox
     const geometry = new THREE.PlaneGeometry(1, 1); 
-    const sprite = new THREE.Mesh(geometry, material); // Mudança para Mesh/PlaneGeometry
+    const sprite = new THREE.Mesh(geometry, material);
     
-    // A escala para VR é aplicada em createVrInfoPanelContent
+    // a escala para VR é aplicada em createVrInfoPanelContent
     if (!isVR) {
-        // Usa sprite para desktop/mobile flutuante
+        // sprite para desktop/mobile flutuante
         const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true, alphaTest: 0.1 });
         const sprite = new THREE.Sprite(spriteMaterial);
         const aspect = finalWidth / finalHeight;
@@ -1407,7 +1556,6 @@ function criarTextoMesh(texto, hotspotHash, isVR = renderer.xr.isPresenting) {
     return sprite;
 }
 
-
 function hideVrPanelIfClicked(hit) {
     if (!vrInfoPanelMesh || !hit || hit.object !== vrInfoPanelMesh || !hit.uv || !vrInfoPanelMesh.userData.closeButton) return false;
     
@@ -1415,29 +1563,25 @@ function hideVrPanelIfClicked(hit) {
     const buttonData = vrInfoPanelMesh.userData.closeButton;
     
     const panelCanvasWidth = buttonData.canvasWidth; // 2048 (VR_SETTINGS.CANVAS_RESOLUTION)
-    const panelCanvasHeight = buttonData.canvasHeight; // Altura gerada
+    const panelCanvasHeight = buttonData.canvasHeight; // altura gerada
     
-    const closeButtonX = buttonData.x; // Coordenada X em pixels
-    const closeButtonY = buttonData.y; // Coordenada Y em pixels
-    const closeButtonSize = buttonData.size; // Tamanho em pixels
+    const closeButtonX = buttonData.x; // coordenada X em pixels
+    const closeButtonY = buttonData.y; // coordenada Y em pixels
+    const closeButtonSize = buttonData.size; // tamanho em pixels
 
-    // Converte a coordenada UV (0 a 1) para a coordenada de pixel na textura (canvas)
     const pixelX = uv.x * panelCanvasWidth;
-    // O canvas.fillText começa no topo (Y=0) e cresce para baixo. 
-    // Como o THREE.js inverte o Y do UV em materiais com mapeamento de textura padrão:
+
     const pixelY = (1 - uv.y) * panelCanvasHeight; 
 
-    // O botão 'X' está no canto superior direito do canvas
-    // Condição de acerto no eixo X: pixelX está entre X e (X + Size)
     const hitX = pixelX >= closeButtonX && pixelX <= (closeButtonX + closeButtonSize);
 
-    // Condição de acerto no eixo Y: pixelY está entre Y e (Y + Size)
+    
     const hitY = pixelY >= closeButtonY && pixelY <= (closeButtonY + closeButtonSize);
 
     if (hitX && hitY) {
         vrInfoPanelMesh.visible = false;
         disposeMesh(vrInfoPanelMesh);
-        // CORREÇÃO: Remove da cena principal (scene)
+  
         scene.remove(vrInfoPanelMesh);
         vrInfoPanelMesh = null;
         return true;
