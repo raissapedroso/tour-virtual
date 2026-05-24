@@ -62,7 +62,7 @@ const ImageLoader = new THREE.ImageLoader();
 let sceneLabelMesh = null;
 let desktopLabelDiv = null; 
 
-// Captura erros não tratados
+// captura erros não tratados
 window.addEventListener('unhandledrejection', (event) => {
     console.error('Erro não tratado em promessa:', event.reason, event);
 });
@@ -207,7 +207,7 @@ function getCenaById(id) {
 init();
 animate();
 
-// carrega cena inicial
+// carrega cena inicial 
 const initialData = getCenaById(1);
 if (initialData) {
     (async () => {

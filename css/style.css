@@ -18,7 +18,7 @@ canvas {
     left: 0;
     width: 100%;
     height: 100%;
-    background: linear-gradient(to bottom, #a8e6cf, #dcedc1);
+    background: linear-gradient(to bottom, #43A047, #e8ede1);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -35,11 +35,10 @@ img {
     display: flex;
     flex-direction: column;
     align-items: center;
-    background: rgba(0, 0, 0, 0.3); /* fundo escuro translúcido */
+    background: white; /* fundo escuro translúcido */
     padding: 30px;
     border-radius: 20px;
-    box-shadow: 0 0 30px rgba(0, 0, 0, 0.4); /* sombra mais forte */
-    backdrop-filter: blur(8px); /* efeito de vidro fosco */
+    box-shadow: 0 0 30px rgba(255, 255, 255, 0.1); /* sombra mais forte */
 }
 
 #loading-bg img {
@@ -49,13 +48,13 @@ img {
     max-width: 200px;
     max-height: 200px;
     margin-bottom: 20px;
-    filter: drop-shadow(0 0 10px #fff6);
+    filter: drop-shadow(0 0 10px rgb(255, 255, 255));
     object-fit: contain;
 }
 
 #loading-text {
     font-size: 1.5em;
-    color: #ffffff;
+    color: #040404;
     text-align: center;
     animation: blink 1.5s infinite;
     max-width: 300px;
