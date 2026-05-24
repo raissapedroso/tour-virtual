@@ -854,15 +854,15 @@ export const scenesData = {
 };
 
 /**
- * PROCESSAMENTO AUTOMÁTICO DE NOMES
- * Preenche o 'name' de cada hotspot com o 'label' da cena de destino.
+ * processamento automáticos dos nomes dos hotspots
  */
 Object.values(scenesData).forEach(scene => {
+
     if (scene.hotspots && Array.isArray(scene.hotspots)) {
         scene.hotspots.forEach(hotspot => {
-            // Se for hotspot de navegação (tem target) e não for informativo (não tem texto)
+           
             if (hotspot.target !== undefined && !hotspot.texto) {
-                // Só preenche se o nome estiver vazio
+    
                 if (!hotspot.name || hotspot.name.trim() === "") {
                     const targetScene = scenesData[hotspot.target];
                     hotspot.name = (targetScene && targetScene.label) 
